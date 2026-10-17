@@ -35,7 +35,14 @@ function AdminService.Start()
 		end
 		return nil
 	end)
-	local _ = Players
+	-- Lets the client show admin-only tools (debug panel). Commands are still checked on the server.
+	local function mark(player: Player)
+		player:SetAttribute("IsAdmin", AdminService.IsAdmin(player))
+	end
+	Players.PlayerAdded:Connect(mark)
+	for _, player in Players:GetPlayers() do
+		task.spawn(mark, player)
+	end
 end
 
 return AdminService

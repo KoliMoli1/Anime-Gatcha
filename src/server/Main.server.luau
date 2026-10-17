@@ -6,7 +6,7 @@ local order = {
 	"ProfileService",
 	"RosterService",
 	"GachaService",
-	"PveService",
+	"BattleService",
 	"PvPQueueService",
 	"AdminService",
 }

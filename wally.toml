@@ -7,6 +7,8 @@ private = true
 
 [dependencies]
 t = "osyrisrblx/t@3.1.1"
+vide = "centau/vide@0.4.1"
+Iris = "sirmallard/iris@2.5.1"
 
 [server-dependencies]
 Cmdr = "evaera/cmdr@1.13.1"

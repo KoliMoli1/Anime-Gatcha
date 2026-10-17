@@ -5,7 +5,12 @@ registry = "test"
 [[package]]
 name = "anime-gatcha/game"
 version = "0.1.0"
-dependencies = [["t", "osyrisrblx/t@3.1.1"], ["Cmdr", "evaera/cmdr@1.13.1"], ["ProfileStore", "lm-loleris/profilestore@1.0.3"]]
+dependencies = [["Iris", "sirmallard/iris@2.5.1"], ["t", "osyrisrblx/t@3.1.1"], ["vide", "centau/vide@0.4.1"], ["Cmdr", "evaera/cmdr@1.13.1"], ["ProfileStore", "lm-loleris/profilestore@1.0.3"]]
+
+[[package]]
+name = "centau/vide"
+version = "0.4.1"
+dependencies = []
 
 [[package]]
 name = "evaera/cmdr"
@@ -20,4 +25,9 @@ dependencies = []
 [[package]]
 name = "osyrisrblx/t"
 version = "3.1.1"
+dependencies = []
+
+[[package]]
+name = "sirmallard/iris"
+version = "2.5.1"
 dependencies = []

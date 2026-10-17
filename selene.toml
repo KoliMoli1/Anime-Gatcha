@@ -2,3 +2,5 @@ std = "roblox"
 
 [lints]
 global_usage = "allow"
+# Vide UI declares properties and children in one table by design.
+mixed_table = "allow"
