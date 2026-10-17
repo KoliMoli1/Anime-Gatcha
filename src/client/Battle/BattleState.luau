@@ -94,6 +94,15 @@ function State.plannedCost(): number
 	return total
 end
 
+-- Team energy minus what the planned moves will spend.
+function State.remainingEnergy(): number
+	local snapshot = State.snapshot()
+	if not snapshot then
+		return 0
+	end
+	return snapshot.Teams[State.side()].Energy - State.plannedCost()
+end
+
 function State.allChosen(): boolean
 	local snapshot = State.snapshot()
 	if not snapshot then

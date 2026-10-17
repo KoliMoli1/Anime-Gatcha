@@ -136,6 +136,17 @@ local function skillButton(index: number, actions: Actions)
 		local action = selected and State.actions()[selected.Slot]
 		return ownChoosing() and action ~= nil and action.Skill == index
 	end
+	-- Affordable if the energy left, plus whatever this unit's current pick costs, covers it.
+	local affordable = function()
+		local unit, selected = selectedUnit()
+		local skill = unit and unit.Skills[index]
+		if not skill or not selected then
+			return false
+		end
+		local action = State.actions()[selected.Slot]
+		local refund = if action then unit.Skills[action.Skill].Cost else 0
+		return State.remainingEnergy() + refund >= skill.Cost
+	end
 	return button({
 		LayoutOrder = 10 + index,
 		Size = UDim2.new(1, 0, 0, 52),
@@ -150,14 +161,25 @@ local function skillButton(index: number, actions: Actions)
 			if chosen() then
 				return Color3.fromRGB(150, 115, 35)
 			end
+			if ownChoosing() and not affordable() then
+				return Color3.fromRGB(70, 40, 44)
+			end
 			return if ownChoosing() then Theme.PanelLight else Theme.Panel
+		end,
+		TextColor3 = function()
+			return if ownChoosing() and not affordable() and not chosen() then Theme.TextDim else Theme.Text
 		end,
 		Text = function()
 			local skill = skillOf()
 			if not skill then
 				return ""
 			end
-			return `  {skill.Name}  ·  {skill.Kind}  ·  {skill.Cost} energy\n  {skill.Description}`
+			local warning = if ownChoosing()
+					and not affordable()
+					and not chosen()
+				then "  ·  not enough energy"
+				else ""
+			return `  {skill.Name}  ·  {skill.Kind}  ·  {skill.Cost} energy{warning}\n  {skill.Description}`
 		end,
 		padding(4),
 		Activated = function()
@@ -303,6 +325,7 @@ local function topBar(remaining)
 			BackgroundColor3 = Color3.fromRGB(28, 32, 46),
 			BorderSizePixel = 0,
 			corner(5),
+			-- Energy left after planned moves (solid) plus what they will spend (faded).
 			create("Frame")({
 				BorderSizePixel = 0,
 				BackgroundColor3 = Theme.Stat.SPD,
@@ -311,7 +334,27 @@ local function topBar(remaining)
 					if not snapshot then
 						return UDim2.fromScale(0, 1)
 					end
-					return UDim2.fromScale(snapshot.Teams[State.side()].Energy / snapshot.MaxEnergy, 1)
+					return UDim2.fromScale(math.max(0, State.remainingEnergy()) / snapshot.MaxEnergy, 1)
+				end,
+				corner(5),
+			}),
+			create("Frame")({
+				BorderSizePixel = 0,
+				BackgroundColor3 = Theme.Stat.CritRate,
+				BackgroundTransparency = 0.55,
+				Position = function()
+					local snapshot = State.snapshot()
+					if not snapshot then
+						return UDim2.fromScale(0, 0)
+					end
+					return UDim2.fromScale(math.max(0, State.remainingEnergy()) / snapshot.MaxEnergy, 0)
+				end,
+				Size = function()
+					local snapshot = State.snapshot()
+					if not snapshot then
+						return UDim2.fromScale(0, 1)
+					end
+					return UDim2.fromScale(State.plannedCost() / snapshot.MaxEnergy, 1)
 				end,
 				corner(5),
 			}),
@@ -321,15 +364,15 @@ local function topBar(remaining)
 				Font = Enum.Font.GothamBold,
 				TextSize = 13,
 				TextStrokeTransparency = 0.5,
+				ZIndex = 2,
 				Text = function()
 					local snapshot = State.snapshot()
 					if not snapshot then
 						return ""
 					end
-					local energy = snapshot.Teams[State.side()].Energy
 					local planned = State.plannedCost()
-					return `Energy {energy}/{snapshot.MaxEnergy}`
-						.. (if planned > 0 then `   ·   planned {planned}` else "")
+					return `Energy {State.remainingEnergy()}/{snapshot.MaxEnergy}`
+						.. (if planned > 0 then `   ·   {planned} planned` else "")
 				end,
 			}),
 		}),
