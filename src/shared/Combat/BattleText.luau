@@ -67,7 +67,25 @@ function BattleText.describe(event: { [string]: any }, names: Names, viewSide: n
 			local team = if event.Side == viewSide then "Your team" else "Enemy team"
 			local sign = if event.Amount >= 0 then "+" else ""
 			return `  {team} energy {sign}{event.Amount}.`
+		elseif event.Kind == "Burn" then
+			return `  {who} is burning ({math.floor(event.Amount * 100 + 0.5)}% per turn).`
+		elseif event.Kind == "Stun" then
+			return `  {who} is stunned!`
+		elseif event.Kind == "EnergySteal" then
+			local thief = if event.SourceSide == viewSide then "Your team" else "The enemy"
+			return `  {thief} stole {event.Amount} energy.`
 		end
+	elseif kind == "EffectMissed" then
+		local who = BattleText.unit(names, viewSide, event.Side, event.Slot)
+		return if event.Reason == "Immune" then `  {who} can't be stunned again yet.` else `  {who} resisted.`
+	elseif kind == "Burn" then
+		return `  {BattleText.unit(names, viewSide, event.Side, event.Slot)} took {event.Amount} burn damage.`
+	elseif kind == "Stunned" then
+		return `{BattleText.unit(names, viewSide, event.Side, event.Slot)} is stunned and loses its turn.`
+	elseif kind == "Revive" then
+		return `  {BattleText.unit(names, viewSide, event.Side, event.Slot)} revived with {event.HP} HP!`
+	elseif kind == "FollowUp" then
+		return `  {BattleText.unit(names, viewSide, event.Side, event.Slot)} follows up!`
 	elseif kind == "Counter" then
 		return `  {BattleText.unit(names, viewSide, event.Side, event.Slot)} counters!`
 	elseif kind == "Fallback" then

@@ -109,6 +109,12 @@ local function effectLines(unit): string
 			table.insert(lines, `Taunting ({turnsText(effect.Turns)})`)
 		elseif effect.Kind == "Shield" then
 			table.insert(lines, `Shield {effect.Amount} ({turnsText(effect.Turns)})`)
+		elseif effect.Kind == "Burn" then
+			table.insert(lines, `Burning {math.floor(effect.Amount * 100 + 0.5)}%/turn ({turnsText(effect.Turns)})`)
+		elseif effect.Kind == "Stun" then
+			table.insert(lines, "Stunned: skips next action")
+		elseif effect.Kind == "StunImmune" then
+			table.insert(lines, "Stun immune")
 		elseif effect.Stat then
 			local relative = effect.Stat == "ATK" or effect.Stat == "DEF" or effect.Stat == "SPD"
 			local amount = math.floor(effect.Amount * 100 + 0.5)

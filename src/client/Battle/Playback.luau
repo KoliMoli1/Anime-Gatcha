@@ -66,6 +66,12 @@ local function play(event)
 			ArenaView.float(event.Side, event.Slot, BattleText.statChange(event.Stat, event.Amount), color)
 		elseif event.Kind == "Taunt" then
 			ArenaView.float(event.Side, event.Slot, "TAUNT", Theme.Accent)
+		elseif event.Kind == "Burn" then
+			ArenaView.float(event.Side, event.Slot, "BURNING", Theme.Stat.CritRate)
+		elseif event.Kind == "Stun" then
+			ArenaView.float(event.Side, event.Slot, "STUN", Theme.Stat.EFF)
+		elseif event.Kind == "EnergySteal" then
+			ArenaView.float(event.Side, event.Slot, `-{event.Amount} energy`, Theme.Stat.SPD)
 		elseif event.Kind == "Shield" then
 			ArenaView.float(event.Side, event.Slot, `Shield {event.Amount}`, Theme.Stat.DEF)
 		elseif event.Kind == "Energy" then
@@ -76,6 +82,30 @@ local function play(event)
 				Theme.Stat.SPD
 			)
 		end
+		task.wait(0.15)
+	elseif kind == "Burn" then
+		State.setHp(event.Side, event.Slot, event.HP)
+		ArenaView.flash(event.Side, event.Slot, Theme.Stat.CritRate)
+		ArenaView.float(event.Side, event.Slot, `{event.Amount} burn`, Theme.Stat.CritRate)
+		task.wait(0.3)
+	elseif kind == "Stunned" then
+		ArenaView.float(event.Side, event.Slot, "STUNNED", Theme.Stat.EFF, true)
+		task.wait(0.4)
+	elseif kind == "Revive" then
+		State.setHp(event.Side, event.Slot, event.HP)
+		ArenaView.revive(event.Side, event.Slot)
+		ArenaView.float(event.Side, event.Slot, "REVIVED", Theme.Good, true)
+		task.wait(0.5)
+	elseif kind == "FollowUp" then
+		ArenaView.float(event.Side, event.Slot, "FOLLOW-UP", Theme.Accent)
+		task.wait(0.15)
+	elseif kind == "EffectMissed" then
+		ArenaView.float(
+			event.Side,
+			event.Slot,
+			if event.Reason == "Immune" then "IMMUNE" else "RESISTED",
+			Theme.TextDim
+		)
 		task.wait(0.15)
 	elseif kind == "Counter" then
 		ArenaView.float(event.Side, event.Slot, "COUNTER", Theme.Accent, true)

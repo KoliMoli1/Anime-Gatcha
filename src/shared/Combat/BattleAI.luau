@@ -63,9 +63,29 @@ local function highestAttack(session: Session, units: { Unit }): Unit?
 end
 
 -- Picks a skill index for one unit given the remaining energy budget.
+local function revives(skill: Types.SkillDef): boolean
+	local effects: { Types.EffectSpec } = skill.Effects or {}
+	for _, spec in effects do
+		if spec.Kind == "Revive" then
+			return true
+		end
+	end
+	return false
+end
+
 local function pickSkill(session: Session, unit: Unit, budget: number, allies: { Unit }, enemies: { Unit }): number
 	local function can(index: number): boolean
-		return unit.Skills[index].Cost <= budget
+		local skill = unit.Skills[index]
+		if skill.Cost > budget then
+			return false
+		end
+		-- A revive is wasted with nobody to bring back.
+		return not revives(skill) or session:HasFallenAlly(unit.Side)
+	end
+	for index = 3, 2, -1 do
+		if revives(unit.Skills[index]) and can(index) then
+			return index
+		end
 	end
 	local class = unit.Def.Class
 	if class == "Defense" then

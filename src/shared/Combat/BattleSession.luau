@@ -19,9 +19,13 @@ BattleSession.DEFAULT_MAX_ROUNDS = 30
 -- Overtime: from this round on, all damage grows by OVERTIME_STEP per round (cumulative).
 BattleSession.OVERTIME_START = 9
 BattleSession.OVERTIME_STEP = 0.15
+-- Burn can never take more than this share of max HP per round, after scaling.
+BattleSession.BURN_CAP = 0.12
+-- After a stun is used up, the unit can't be stunned again for this many rounds.
+BattleSession.STUN_IMMUNITY_TURNS = 1
 
 export type Effect = {
-	Kind: "StatMod" | "Taunt" | "Shield",
+	Kind: "StatMod" | "Taunt" | "Shield" | "Burn" | "Stun" | "StunImmune",
 	Key: string,
 	Stat: Types.StatName?,
 	Amount: number,
@@ -43,6 +47,8 @@ export type Unit = {
 	Tiebreak: number,
 	Skills: { Types.SkillDef },
 	Passive: Types.PassiveDef?,
+	-- Revives (passive or skill) are once per unit per battle.
+	ReviveUsed: boolean,
 }
 
 export type Team = {
@@ -101,6 +107,7 @@ local function makeUnit(
 		Tiebreak = 0,
 		Skills = unitSkills,
 		Passive = def.Passive and passives[def.Passive] or nil,
+		ReviveUsed = false,
 	}
 end
 
@@ -159,13 +166,40 @@ function BattleSession.Effective(self: Session, unit: Unit, stat: Types.StatName
 	return Stats.apply(stat, base, self:Modifier(unit, stat))
 end
 
-function BattleSession.HasTaunt(_self: Session, unit: Unit): boolean
+function BattleSession.HasStatus(_self: Session, unit: Unit, kind: string): boolean
 	for _, effect in unit.Effects do
-		if effect.Kind == "Taunt" then
+		if effect.Kind == kind then
 			return true
 		end
 	end
 	return false
+end
+
+function BattleSession.HasTaunt(self: Session, unit: Unit): boolean
+	return self:HasStatus(unit, "Taunt")
+end
+
+local function removeStatus(unit: Unit, kind: string)
+	for index = #unit.Effects, 1, -1 do
+		if unit.Effects[index].Kind == kind then
+			table.remove(unit.Effects, index)
+		end
+	end
+end
+
+-- Adds an effect, or refreshes the one with the same key (longer duration, stronger amount).
+local function addOrRefresh(unit: Unit, effect: Effect)
+	for _, existing in unit.Effects do
+		if existing.Key == effect.Key then
+			existing.Turns = math.max(existing.Turns, effect.Turns)
+			if math.abs(effect.Amount) > math.abs(existing.Amount) then
+				existing.Amount = effect.Amount
+			end
+			existing.Fresh = true
+			return
+		end
+	end
+	unit.Effects[#unit.Effects + 1] = effect
 end
 
 function BattleSession.Living(self: Session, side: number): { Unit }
@@ -204,7 +238,44 @@ function BattleSession._beginRound(self: Session)
 	})
 end
 
+-- Burn ticks at the end of the round: % of max HP, ignores DEF, shields absorb it.
+function BattleSession._tickBurns(self: Session)
+	for _, team in self.Teams do
+		for _, unit in team.Units do
+			if unit.Alive then
+				for _, effect in table.clone(unit.Effects) do
+					if effect.Kind == "Burn" and unit.Alive then
+						local amount = math.max(1, math.floor(unit.MaxHP * effect.Amount + 0.5))
+						local absorbed = 0
+						for _, shield in unit.Effects do
+							if shield.Kind == "Shield" and shield.Amount > 0 and amount > 0 then
+								local used = math.min(shield.Amount, amount)
+								shield.Amount -= used
+								amount -= used
+								absorbed += used
+							end
+						end
+						unit.HP = math.max(0, unit.HP - amount)
+						self:_emit({
+							Type = "Burn",
+							Side = unit.Side,
+							Slot = unit.Slot,
+							Amount = amount,
+							Absorbed = absorbed,
+							HP = unit.HP,
+						})
+						if unit.HP <= 0 then
+							self:_knockOut(unit)
+						end
+					end
+				end
+			end
+		end
+	end
+end
+
 function BattleSession._endRound(self: Session)
+	self:_tickBurns()
 	for _, team in self.Teams do
 		for _, unit in team.Units do
 			local kept = {}
@@ -339,24 +410,108 @@ function BattleSession._resolveTargets(self: Session, actor: Unit, skill: Types.
 	return if target then { target } else {}
 end
 
+function BattleSession._revive(self: Session, unit: Unit, health: number)
+	unit.ReviveUsed = true
+	unit.Alive = true
+	unit.Effects = {}
+	unit.HP = math.max(1, math.floor(unit.MaxHP * health + 0.5))
+	self:_emit({ Type = "Revive", Side = unit.Side, Slot = unit.Slot, HP = unit.HP })
+end
+
 function BattleSession._applyEffect(self: Session, source: Unit, recipient: Unit, spec: Types.EffectSpec, key: string)
+	if spec.Kind == "Revive" then
+		if not recipient.Alive and not recipient.ReviveUsed then
+			self:_revive(recipient, spec.Amount or 0.3)
+		end
+		return
+	end
 	if not recipient.Alive then
 		return
 	end
-	if spec.Chance and not self.Rng:chance(spec.Chance) then
-		self:_emit({ Type = "EffectMissed", Side = recipient.Side, Slot = recipient.Slot, Key = key })
+	local hostile = recipient.Side ~= source.Side
+	local eff = self:Effective(source, "EFF")
+	local res = self:Effective(recipient, "RES")
+	local chance = spec.Chance
+	if spec.Kind == "Stun" then
+		if self:HasStatus(recipient, "StunImmune") or self:HasStatus(recipient, "Stun") then
+			self:_emit({
+				Type = "EffectMissed",
+				Side = recipient.Side,
+				Slot = recipient.Slot,
+				Key = key,
+				Reason = "Immune",
+			})
+			return
+		end
+		chance = math.clamp((chance or 1) * math.clamp(1 + eff - res, 0.5, 1.5), 0, 1)
+	elseif chance and spec.Scale == "Chance" and hostile then
+		chance = math.clamp(chance * math.clamp(1 + eff - res, 0.5, 1.5), 0, 1)
+	end
+	if chance and not self.Rng:chance(chance) then
+		self:_emit({
+			Type = "EffectMissed",
+			Side = recipient.Side,
+			Slot = recipient.Slot,
+			Key = key,
+			Reason = "Resisted",
+		})
 		return
 	end
 	local event: Event = { Type = "Effect", Kind = spec.Kind, Side = recipient.Side, Slot = recipient.Slot, Key = key }
+
+	if spec.Kind == "Burn" then
+		local amount = spec.Amount or 0.05
+		local turns = spec.Turns or 2
+		if hostile then
+			if spec.Scale == "Duration" then
+				turns = Stats.debuffTurns(turns, eff, res)
+			else
+				amount = Stats.debuffPower(amount, eff, res)
+			end
+		end
+		amount = math.min(amount, BattleSession.BURN_CAP)
+		addOrRefresh(recipient, {
+			Kind = "Burn",
+			Key = key,
+			Amount = amount,
+			Turns = turns,
+			Debuff = true,
+			Fresh = true,
+		})
+		event.Amount = amount
+		event.Turns = turns
+		self:_emit(event)
+		return
+	elseif spec.Kind == "Stun" then
+		addOrRefresh(recipient, {
+			Kind = "Stun",
+			Key = key,
+			Amount = 0,
+			Turns = spec.Turns or 1,
+			Debuff = true,
+			Fresh = true,
+		})
+		event.Turns = spec.Turns or 1
+		self:_emit(event)
+		return
+	elseif spec.Kind == "EnergySteal" then
+		local victim = self.Teams[recipient.Side]
+		local thief = self.Teams[source.Side]
+		local stolen = math.min(victim.Energy, spec.Amount or 1)
+		victim.Energy -= stolen
+		thief.Energy = math.min(BattleSession.MAX_ENERGY, thief.Energy + stolen)
+		event.Amount = stolen
+		event.SourceSide = source.Side
+		self:_emit(event)
+		return
+	end
 
 	if spec.Kind == "StatMod" then
 		local stat = assert(spec.Stat, "StatMod needs a Stat")
 		local amount = spec.Amount or 0
 		local turns = spec.Turns or 1
-		local debuff = amount < 0 and recipient.Side ~= source.Side
+		local debuff = amount < 0 and hostile
 		if debuff then
-			local eff = self:Effective(source, "EFF")
-			local res = self:Effective(recipient, "RES")
 			if spec.Scale == "Duration" then
 				turns = Stats.debuffTurns(turns, eff, res)
 			else
@@ -462,8 +617,24 @@ function BattleSession._recipients(
 		return self:Living(3 - source.Side)
 	elseif to == "Attacker" then
 		return if attacker then { attacker } else {}
+	elseif to == "FallenAlly" then
+		for _, unit in self.Teams[source.Side].Units do
+			if not unit.Alive and not unit.ReviveUsed then
+				return { unit }
+			end
+		end
+		return {}
 	end
 	return targets
+end
+
+function BattleSession.HasFallenAlly(self: Session, side: number): boolean
+	for _, unit in self.Teams[side].Units do
+		if not unit.Alive and not unit.ReviveUsed then
+			return true
+		end
+	end
+	return false
 end
 
 function BattleSession._knockOut(self: Session, unit: Unit)
@@ -471,6 +642,10 @@ function BattleSession._knockOut(self: Session, unit: Unit)
 	unit.Alive = false
 	unit.Effects = {}
 	self:_emit({ Type = "KO", Side = unit.Side, Slot = unit.Slot })
+	local passive = unit.Passive
+	if passive and passive.Revive and not unit.ReviveUsed then
+		self:_revive(unit, passive.Revive.Health)
+	end
 end
 
 export type HitOptions = { Single: boolean, IsCounter: boolean? }
@@ -544,6 +719,20 @@ end
 
 function BattleSession._perform(self: Session, unit: Unit, action: Types.Action)
 	local team = self.Teams[unit.Side]
+	if self:HasStatus(unit, "Stun") then
+		-- The stun is used up; brief immunity stops stun-locking.
+		removeStatus(unit, "Stun")
+		addOrRefresh(unit, {
+			Kind = "StunImmune",
+			Key = "stun_immunity",
+			Amount = 0,
+			Turns = BattleSession.STUN_IMMUNITY_TURNS,
+			Debuff = false,
+			Fresh = true,
+		})
+		self:_emit({ Type = "Stunned", Side = unit.Side, Slot = unit.Slot })
+		return
+	end
 	local skill = unit.Skills[action.Skill] or unit.Skills[1]
 	if skill.Cost > team.Energy then
 		self:_emit({ Type = "Fallback", Side = unit.Side, Slot = unit.Slot, Wanted = skill.Id })
@@ -570,6 +759,15 @@ function BattleSession._perform(self: Session, unit: Unit, action: Types.Action)
 	if skill.Multiplier then
 		for _, target in targets do
 			self:_hit(unit, target, skill.Multiplier, { Single = skill.Target == "Enemy" })
+		end
+	end
+	local followUp = skill.FollowUp
+	if followUp and unit.Alive then
+		for _, target in targets do
+			if target.Alive and target.Side ~= unit.Side and target.HP / target.MaxHP < followUp.Threshold then
+				self:_emit({ Type = "FollowUp", Side = unit.Side, Slot = unit.Slot })
+				self:_hit(unit, target, followUp.Multiplier, { Single = false })
+			end
 		end
 	end
 	if unit.Alive then
@@ -618,10 +816,12 @@ function BattleSession.Resolve(self: Session): { Event }
 	end
 	if self.Phase ~= "Finished" then
 		self:_endRound()
-		if self.Round >= self.MaxRounds then
+		-- Burn can finish a team off at the end of the round.
+		local knockedOut = self:_checkWinner()
+		if not knockedOut and self.Round >= self.MaxRounds then
 			local a, b = self:_hpFraction(1), self:_hpFraction(2)
 			self:_finish(if a > b then 1 elseif b > a then 2 else 0, "RoundLimit")
-		else
+		elseif not knockedOut then
 			self:_beginRound()
 		end
 	end
@@ -680,6 +880,7 @@ function BattleSession.Snapshot(self: Session, viewSide: number?)
 				Effects = effects,
 				Skills = skills,
 				Passive = unit.Passive and { Name = unit.Passive.Name, Description = unit.Passive.Description } or nil,
+				ReviveUsed = unit.ReviveUsed,
 			}
 		end
 		teams[side] = { Units = units, Energy = team.Energy, Submitted = team.Actions ~= nil }

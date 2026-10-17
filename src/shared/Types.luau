@@ -21,17 +21,21 @@ export type SpeedRange = { Min: number, Max: number }
 
 export type TargetKind = "Enemy" | "AllEnemies" | "Ally" | "AllAllies" | "Self"
 
--- "Target" = whoever the skill hit; "Attacker" is only valid inside OnHit passives.
-export type EffectRecipient = "Target" | "Self" | "AllAllies" | "AllEnemies" | "Attacker"
+-- "Target" = whoever the skill hit; "Attacker" is only valid inside OnHit passives;
+-- "FallenAlly" = the first knocked-out ally that has not been revived yet.
+export type EffectRecipient = "Target" | "Self" | "AllAllies" | "AllEnemies" | "Attacker" | "FallenAlly"
 
+-- Burn: Amount = fraction of max HP lost at the end of each round (ignores DEF).
+-- Stun: the unit skips its next action. EnergySteal: Amount energy moves to the caster's team.
+-- Revive: brings a FallenAlly back with Amount of max HP (once per unit per battle).
 export type EffectSpec = {
-	Kind: "StatMod" | "Taunt" | "Heal" | "Shield" | "Cleanse" | "Energy",
+	Kind: "StatMod" | "Taunt" | "Heal" | "Shield" | "Cleanse" | "Energy" | "Burn" | "Stun" | "EnergySteal" | "Revive",
 	To: EffectRecipient?,
 	Stat: StatName?,
 	Amount: number?,
 	Turns: number?,
-	-- Debuffs only: which part Effectiveness/Resistance scales.
-	Scale: ("Power" | "Duration")?,
+	-- Debuffs only: which part Effectiveness/Resistance scales ("Chance" = landing chance).
+	Scale: ("Power" | "Duration" | "Chance")?,
 	Chance: number?,
 }
 
@@ -46,6 +50,8 @@ export type SkillDef = {
 	Multiplier: number?,
 	PrioritySpeed: number?,
 	Effects: { EffectSpec }?,
+	-- Extra hit on any target left below Threshold of max HP after the skill's hits.
+	FollowUp: { Threshold: number, Multiplier: number }?,
 	Description: string,
 }
 
@@ -55,6 +61,8 @@ export type PassiveDef = {
 	Description: string,
 	Counter: { Chance: number, Multiplier: number }?,
 	OnHit: { WhileTaunting: boolean?, Effects: { EffectSpec } }?,
+	-- Once per battle, come back with Health of max HP when knocked out.
+	Revive: { Health: number }?,
 }
 
 export type CharacterDef = {

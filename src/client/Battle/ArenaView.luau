@@ -53,6 +53,10 @@ local function effectSummary(unit): string
 			table.insert(parts, `Taunt {effect.Turns}`)
 		elseif effect.Kind == "Shield" then
 			table.insert(parts, `Shield {effect.Amount}`)
+		elseif effect.Kind == "Burn" then
+			table.insert(parts, `Burn {effect.Turns}`)
+		elseif effect.Kind == "Stun" then
+			table.insert(parts, "Stunned")
 		elseif effect.Stat then
 			local arrow = if effect.Amount >= 0 then "+" else "-"
 			table.insert(parts, `{effect.Stat}{arrow} {effect.Turns}`)
@@ -317,6 +321,18 @@ function ArenaView.knockOut(side: number, slot: number)
 	for _, descendant in model:GetDescendants() do
 		if descendant:IsA("BasePart") and descendant.Name ~= "HumanoidRootPart" then
 			TweenService:Create(descendant, TweenInfo.new(0.5), { LocalTransparencyModifier = 0.75 }):Play()
+		end
+	end
+end
+
+function ArenaView.revive(side: number, slot: number)
+	local model = ArenaView.model(side, slot)
+	if not model then
+		return
+	end
+	for _, descendant in model:GetDescendants() do
+		if descendant:IsA("BasePart") and descendant.Name ~= "HumanoidRootPart" then
+			TweenService:Create(descendant, TweenInfo.new(0.4), { LocalTransparencyModifier = 0 }):Play()
 		end
 	end
 end
