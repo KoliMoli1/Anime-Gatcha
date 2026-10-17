@@ -342,6 +342,9 @@ function PveService.Start()
 		Validate = function(request)
 			return request == nil or requestShape(request)
 		end,
+		OnReject = function(player)
+			return handle(player, nil)
+		end,
 	}, handle)
 	Players.PlayerRemoving:Connect(function(player)
 		battles[player] = nil

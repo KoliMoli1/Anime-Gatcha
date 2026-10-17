@@ -22,6 +22,9 @@ export type Options = {
 	Burst: number?,
 	-- Returns true when the arguments are acceptable.
 	Validate: ((...any) -> boolean)?,
+	-- What a rejected call returns. Handlers whose callers expect a full state
+	-- (snapshots) should return that state here so clients never break.
+	OnReject: ((Player, string) -> any)?,
 }
 
 type Bucket = { Tokens: number, Updated: number }
@@ -71,11 +74,15 @@ end
 function Net.handle(name: string, options: Options, handler: (Player, ...any) -> any): RemoteFunction
 	local remote = getOrCreate("RemoteFunction", name) :: RemoteFunction
 	remote.OnServerInvoke = function(player: Player, ...)
-		if not allow(player, name, options) then
-			return { success = false, message = "Slow down a little." }
-		end
-		if options.Validate and not options.Validate(...) then
-			return { success = false, message = "Invalid request." }
+		local reason = if not allow(player, name, options)
+			then "Slow down a little."
+			elseif options.Validate and not options.Validate(...) then "Invalid request."
+			else nil
+		if reason then
+			if options.OnReject then
+				return options.OnReject(player, reason)
+			end
+			return { success = false, message = reason }
 		end
 		return handler(player, ...)
 	end

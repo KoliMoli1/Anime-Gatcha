@@ -21,6 +21,7 @@ local ProfileService = {}
 
 local store = ProfileStore.New(STORE_NAME, Schema.default(0, Characters))
 local profiles: { [Player]: any } = {}
+local shuttingDown = false
 local loadedCallbacks: { (Player) -> () } = {}
 local changedCallbacks: { (Player) -> () } = {}
 
@@ -73,7 +74,10 @@ local function onPlayerAdded(player: Player)
 	profile:Reconcile()
 	profile.OnSessionEnd:Connect(function()
 		profiles[player] = nil
-		player:Kick("Your save was opened on another server. Please rejoin.")
+		-- Only a lost session lock means another server took the save.
+		if not shuttingDown and player.Parent == Players then
+			player:Kick("Your save was opened on another server. Please rejoin.")
+		end
 	end)
 	if player.Parent ~= Players then
 		profile:EndSession()
@@ -142,6 +146,9 @@ function ProfileService.Reset(player: Player): boolean
 end
 
 function ProfileService.Start()
+	game:BindToClose(function()
+		shuttingDown = true
+	end)
 	for _, player in Players:GetPlayers() do
 		task.spawn(onPlayerAdded, player)
 	end
