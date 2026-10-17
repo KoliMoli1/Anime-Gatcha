@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rokit and project tools
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          curl -sSL -o rokit.zip https://github.com/rojo-rbx/rokit/releases/download/v1.2.0/rokit-1.2.0-linux-x86_64.zip
+          unzip -q rokit.zip && ./rokit self-install && rm rokit rokit.zip
+          echo "$HOME/.rokit/bin" >> "$GITHUB_PATH"
+          "$HOME/.rokit/bin/rokit" authenticate github --token "$GITHUB_TOKEN" || true
+          "$HOME/.rokit/bin/rokit" install --no-trust-check
+
+      - name: Install packages
+        run: wally install
+
+      - name: Format
+        run: stylua --check src tests tools/sim.luau tools/studio_sync.luau
+
+      - name: Lint
+        run: selene src
+
+      - name: Type check
+        run: |
+          mkdir -p .tooling
+          curl -sSL -o .tooling/globalTypes.d.luau https://raw.githubusercontent.com/JohnnyMorganz/luau-lsp/main/scripts/globalTypes.d.luau
+          rojo sourcemap default.project.json -o sourcemap.json
+          luau-lsp analyze --definitions=.tooling/globalTypes.d.luau --sourcemap=sourcemap.json src
+
+      - name: Unit tests
+        run: lune run tests/run
+
+      - name: Balance gate
+        run: |
+          lune run tools/sim 100 | tee sim.txt
+          grep -q "GATE: TTK PASS | rounds PASS | class balance PASS" sim.txt

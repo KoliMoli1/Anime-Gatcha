@@ -1,0 +1,13 @@
+[package]
+name = "anime-gatcha/game"
+version = "0.1.0"
+registry = "https://github.com/UpliftGames/wally-index"
+realm = "shared"
+private = true
+
+[dependencies]
+t = "osyrisrblx/t@3.1.1"
+
+[server-dependencies]
+Cmdr = "evaera/cmdr@1.13.1"
+ProfileStore = "lm-loleris/profilestore@1.0.3"
