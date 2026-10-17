@@ -1,5 +1,7 @@
 # Anime Gatcha
 
+Kool Game.
+
 3v3 turn-based anime gacha PvP game for Roblox. Roadmap, decisions and changelog live in the team's Claude Docs roadmap.
 
 ## Layout
