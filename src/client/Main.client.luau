@@ -1,6 +1,5 @@
 --!strict
--- Client entry point. Prototype menus in StarterGui (summon, team select,
--- collection, PvP queue) still run until Phases 4-5 replace them.
+-- Client entry point.
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 -- Admin console (F2). The server rejects commands from non-admins.
@@ -8,10 +7,15 @@ local CmdrClient = require(ReplicatedStorage:WaitForChild("CmdrClient") :: Modul
 CmdrClient:SetActivationKeys({ Enum.KeyCode.F2 })
 
 local Battle = script.Parent:WaitForChild("Battle")
+local Hud = script.Parent:WaitForChild("Hud")
 local BattleController = require(Battle:WaitForChild("BattleController") :: ModuleScript) :: any
-local MainHud = require(script.Parent:WaitForChild("Hud"):WaitForChild("MainHud") :: ModuleScript) :: any
+local ProfileState = require(Hud:WaitForChild("ProfileState") :: ModuleScript) :: any
+local MainHud = require(Hud:WaitForChild("MainHud") :: ModuleScript) :: any
+local TeamFollowers = require(Hud:WaitForChild("TeamFollowers") :: ModuleScript) :: any
 local DebugPanel = require(script.Parent:WaitForChild("Debug"):WaitForChild("DebugPanel") :: ModuleScript) :: any
 
+ProfileState.Start()
 BattleController.Start()
 MainHud.Start()
+TeamFollowers.Start()
 DebugPanel.Start()

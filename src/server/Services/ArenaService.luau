@@ -100,6 +100,26 @@ local function placeholderRig(color: Color3): Model
 	return model
 end
 
+-- One template rig per class in ReplicatedStorage.UnitRigs: arenas clone it and the
+-- Characters screen shows the same model.
+local templates = Instance.new("Folder")
+templates.Name = "UnitRigs"
+for class, color in Theme.Class do
+	local rig = placeholderRig(color)
+	rig.Name = class
+	rig.Parent = templates
+end
+local old = ReplicatedStorage:FindFirstChild("UnitRigs")
+if old then
+	old:Destroy()
+end
+templates.Parent = ReplicatedStorage
+
+local function rigFor(class: string): Model
+	local template = templates:FindFirstChild(class)
+	return if template then template:Clone() else placeholderRig(Color3.new(0.8, 0.8, 0.8))
+end
+
 -- Height from a rig's pivot to its feet, so it stands on the pad.
 local function footOffset(rig: Model): number
 	local humanoid = rig:FindFirstChildOfClass("Humanoid")
@@ -166,7 +186,7 @@ function ArenaService.Create(battleId: string, teams): Arena
 				Parent = model,
 			})
 			local info = teams[side][index]
-			local rig = placeholderRig(Theme.Class[info.Class] or Color3.new(0.8, 0.8, 0.8))
+			local rig = rigFor(info.Class)
 			rig.Name = `{side}_{index}`
 			rig:SetAttribute("BattleId", battleId)
 			rig:SetAttribute("Side", side)

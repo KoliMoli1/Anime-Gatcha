@@ -74,6 +74,19 @@ local function play(event)
 			ArenaView.float(event.Side, event.Slot, `-{event.Amount} energy`, Theme.Stat.SPD)
 		elseif event.Kind == "Shield" then
 			ArenaView.float(event.Side, event.Slot, `Shield {event.Amount}`, Theme.Stat.DEF)
+		elseif event.Kind == "DamageReduction" then
+			ArenaView.float(event.Side, event.Slot, `-{math.floor(event.Amount * 100 + 0.5)}% DMG`, Theme.Stat.DEF)
+		elseif event.Kind == "Provoke" then
+			ArenaView.float(event.Side, event.Slot, "PROVOKED", Theme.Accent)
+		elseif event.Kind == "StripBuffs" then
+			ArenaView.float(event.Side, event.Slot, "BUFFS REMOVED", Theme.Bad)
+		elseif event.Kind == "Bleed" then
+			ArenaView.float(
+				event.Side,
+				event.Slot,
+				`BLEED {math.floor(event.Amount * 100 + 0.5)} x{event.Count}`,
+				Theme.Bad
+			)
 		elseif event.Kind == "Energy" then
 			ArenaView.float(
 				event.Side,
@@ -88,6 +101,41 @@ local function play(event)
 		ArenaView.flash(event.Side, event.Slot, Theme.Stat.CritRate)
 		ArenaView.float(event.Side, event.Slot, `{event.Amount} burn`, Theme.Stat.CritRate)
 		task.wait(0.3)
+	elseif kind == "Bleed" then
+		State.setHp(event.Side, event.Slot, event.HP)
+		ArenaView.flash(event.Side, event.Slot, Theme.Bad)
+		ArenaView.float(event.Side, event.Slot, `{event.Amount} bleed`, Theme.Bad)
+		task.wait(0.25)
+	elseif kind == "Dodge" then
+		ArenaView.float(event.Side, event.Slot, "DODGED", Theme.Stat.SPD, true)
+		task.wait(0.3)
+	elseif kind == "Combo" then
+		ArenaView.float(event.Side, event.Slot, `x{event.Hits}!`, Theme.Accent, event.Hits >= 5)
+		task.wait(0.2)
+	elseif kind == "Transform" then
+		if event.HP then
+			State.setHp(event.Side, event.Slot, event.HP)
+		end
+		ArenaView.flash(event.Side, event.Slot, Theme.Accent)
+		ArenaView.float(event.Side, event.Slot, "TRANSFORM!", Theme.Accent, true)
+		task.wait(0.8)
+	elseif kind == "Shadow" then
+		State.setHp(event.Side, event.Slot, event.HP)
+		ArenaView.revive(event.Side, event.Slot)
+		ArenaView.float(event.Side, event.Slot, "SHADOW RISES", Color3.fromRGB(170, 110, 255), true)
+		task.wait(0.6)
+	elseif kind == "Kit" then
+		ArenaView.float(event.Side, event.Slot, event.Text, Theme.Accent)
+		task.wait(0.3)
+	elseif kind == "Cancelled" then
+		ArenaView.float(event.Side, event.Slot, "CANCELLED", Theme.Bad, true)
+		task.wait(0.4)
+	elseif kind == "Sealed" then
+		ArenaView.float(event.Side, event.Slot, "SEALED", Theme.TextDim)
+		task.wait(0.3)
+	elseif kind == "Rest" then
+		ArenaView.float(event.Side, event.Slot, "REST", Theme.TextDim)
+		task.wait(0.2)
 	elseif kind == "Stunned" then
 		ArenaView.float(event.Side, event.Slot, "STUNNED", Theme.Stat.EFF, true)
 		task.wait(0.4)

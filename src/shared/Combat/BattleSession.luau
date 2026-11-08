@@ -4,10 +4,12 @@
 -- Round flow: BeginRound (energy regen, speed rolls) -> both sides Submit ->
 -- Resolve (speed-ordered actions) -> EndRound (effect timers) -> next BeginRound.
 -- Every change is reported as an ordered event list for clients to play back.
+-- Character signature gimmicks live in Kits.luau and hook in at the points marked "kit".
 
 local Types = require("../Types")
 local Rng = require("../Util/Rng")
 local Stats = require("./Stats")
+local Kits = require("./Kits")
 local SkillContent = require("../Content/Skills")
 
 local BattleSession = {}
@@ -23,21 +25,51 @@ BattleSession.OVERTIME_STEP = 0.15
 BattleSession.BURN_CAP = 0.12
 -- After a stun is used up, the unit can't be stunned again for this many rounds.
 BattleSession.STUN_IMMUNITY_TURNS = 1
+-- Evasion and damage reduction caps for any unit.
+BattleSession.EVASION_CAP = 0.8
+BattleSession.REDUCTION_CAP = 0.9
+-- Bleed: reapplying adds potency and count up to these caps.
+BattleSession.BLEED_POTENCY_STEP = 0.03
+BattleSession.BLEED_POTENCY_CAP = 0.09
+BattleSession.BLEED_COUNT_CAP = 4
+-- Action.Skill = REST skips the unit's turn (for units whose cheapest move costs energy).
+BattleSession.REST = 0
 
 export type Effect = {
-	Kind: "StatMod" | "Taunt" | "Shield" | "Burn" | "Stun" | "StunImmune",
+	Kind: "StatMod"
+		| "Taunt"
+		| "Shield"
+		| "Burn"
+		| "Stun"
+		| "StunImmune"
+		| "DamageReduction"
+		| "Provoke"
+		| "Bleed"
+		| "BleedImmune",
 	Key: string,
 	Stat: Types.StatName?,
 	Amount: number,
 	Turns: number,
 	Debuff: boolean,
 	Fresh: boolean,
+	-- Never ticks down (bleed, barriers); removed by its own rules.
+	Permanent: boolean?,
+	-- Not removed by StripBuffs.
+	Unremovable: boolean?,
+	-- Bleed hits left, or bleed counts blocked for BleedImmune.
+	Count: number?,
+	-- Provoke: the unit that must be targeted.
+	SourceSide: number?,
+	SourceSlot: number?,
 }
 
 export type Unit = {
 	Side: number,
 	Slot: number,
 	Def: Types.CharacterDef,
+	Items: { Types.ItemDef },
+	Name: string,
+	Class: Types.ClassName,
 	Base: Stats.BattleStats,
 	HP: number,
 	MaxHP: number,
@@ -47,14 +79,34 @@ export type Unit = {
 	Tiebreak: number,
 	Skills: { Types.SkillDef },
 	Passive: Types.PassiveDef?,
-	-- Revives (passive or skill) are once per unit per battle.
+	-- Revives (passive, skill, transformation or shadow) are once per unit per battle.
 	ReviveUsed: boolean,
+	EnergyRegen: number,
+	-- Permanent battle bonuses outside the +/-50% cap (ATK is relative, the rest are points).
+	Perm: { ATK: number, CritRate: number, CritDamage: number },
+	Evasion: number,
+	-- The first attack aimed at a unit each round rolls its evasion; later ones always land.
+	DodgeRolled: boolean,
+	-- Uses[skillId] = times used; History[round] = skill index used that round.
+	Uses: { [string]: number },
+	History: { [number]: number },
+	UltimateUsed: boolean,
+	-- Cooldowns[skillId] = last round the skill is still unusable.
+	Cooldowns: { [string]: number },
+	-- DamageTaken[round] = damage after DEF, before damage reduction and shields.
+	DamageTaken: { [number]: number },
+	NoHeal: boolean,
+	IsShadow: boolean,
+	KitId: string?,
+	Kit: { [string]: any },
 }
 
 export type Team = {
 	Units: { Unit },
 	Energy: number,
 	Actions: { [number]: Types.Action }?,
+	-- Round in which this team's energy regen is halved.
+	HalfRegenRound: number?,
 }
 
 export type Event = { [string]: any }
@@ -76,10 +128,21 @@ export type Session = typeof(setmetatable(
 		Winner: number?,
 		EndReason: string?,
 		Rng: Rng.Rng,
+		SkillDefs: { [string]: Types.SkillDef },
 		_events: { Event },
 	},
 	BattleSession
 ))
+
+export type HitOptions = {
+	Single: boolean,
+	IsCounter: boolean?,
+	Skill: Types.SkillDef?,
+	CritBonus: number?,
+	CritDamageBonus: number?,
+	-- The dodge roll for this attack was already made.
+	SkipDodge: boolean?,
+}
 
 local function makeUnit(
 	side: number,
@@ -98,6 +161,9 @@ local function makeUnit(
 		Side = side,
 		Slot = slot,
 		Def = def,
+		Items = loadout.Items,
+		Name = def.Name,
+		Class = def.Class,
 		Base = base,
 		HP = base.HP,
 		MaxHP = base.HP,
@@ -108,6 +174,19 @@ local function makeUnit(
 		Skills = unitSkills,
 		Passive = def.Passive and passives[def.Passive] or nil,
 		ReviveUsed = false,
+		EnergyRegen = def.EnergyRegen,
+		Perm = { ATK = 0, CritRate = 0, CritDamage = 0 },
+		Evasion = 0,
+		DodgeRolled = false,
+		Uses = {},
+		History = {},
+		UltimateUsed = false,
+		Cooldowns = {},
+		DamageTaken = {},
+		NoHeal = false,
+		IsShadow = false,
+		KitId = def.Kit,
+		Kit = {},
 	}
 end
 
@@ -132,8 +211,17 @@ function BattleSession.new(config: Config): Session
 		Winner = nil :: number?,
 		EndReason = nil :: string?,
 		Rng = Rng.new(config.Seed),
+		SkillDefs = skills,
 		_events = {},
 	}, BattleSession)
+	for _, team in self.Teams do
+		for _, unit in team.Units do
+			local kit = self:KitOf(unit)
+			if kit and kit.Init then
+				kit.Init(self, unit)
+			end
+		end
+	end
 	self:_beginRound()
 	return self
 end
@@ -147,6 +235,14 @@ end
 
 function BattleSession._emit(self: Session, event: Event)
 	table.insert(self._events, event)
+end
+
+function BattleSession.KitOf(_self: Session, unit: Unit): Kits.Kit?
+	return if unit.KitId then Kits[unit.KitId] else nil
+end
+
+function BattleSession.Skill(self: Session, id: string): Types.SkillDef
+	return assert(self.SkillDefs[id], `Unknown skill {id}`)
 end
 
 -- Stats ---------------------------------------------------------------------------
@@ -163,7 +259,45 @@ end
 
 function BattleSession.Effective(self: Session, unit: Unit, stat: Types.StatName): number
 	local base = (unit.Base :: any)[stat] :: number
-	return Stats.apply(stat, base, self:Modifier(unit, stat))
+	local value = Stats.apply(stat, base, self:Modifier(unit, stat))
+	if stat == "ATK" then
+		value *= 1 + unit.Perm.ATK
+	elseif stat == "CritRate" then
+		value = math.clamp(value + unit.Perm.CritRate, 0, 1)
+	elseif stat == "CritDamage" then
+		value += unit.Perm.CritDamage
+	end
+	return value
+end
+
+-- Crit chance of attacker against target, including kit bonuses (speed gaps).
+function BattleSession.CritChance(self: Session, attacker: Unit, target: Unit?): number
+	local chance = self:Effective(attacker, "CritRate")
+	local kit = self:KitOf(attacker)
+	if kit and kit.CritBonus and target then
+		chance += kit.CritBonus(self, attacker, target)
+	end
+	return math.clamp(chance, 0, 1)
+end
+
+function BattleSession.EvasionOf(self: Session, unit: Unit): number
+	local evasion = unit.Evasion
+	local kit = self:KitOf(unit)
+	if kit and kit.EvasionBonus then
+		evasion += kit.EvasionBonus(self, unit)
+	end
+	return math.clamp(evasion, 0, BattleSession.EVASION_CAP)
+end
+
+-- Total damage reduction. Pierce ignores timed reduction but not permanent (barriers).
+function BattleSession.DamageReduction(_self: Session, unit: Unit, pierce: boolean?): number
+	local total = 0
+	for _, effect in unit.Effects do
+		if effect.Kind == "DamageReduction" and (not pierce or effect.Permanent) then
+			total += effect.Amount
+		end
+	end
+	return math.clamp(total, 0, BattleSession.REDUCTION_CAP)
 end
 
 function BattleSession.HasStatus(_self: Session, unit: Unit, kind: string): boolean
@@ -175,8 +309,29 @@ function BattleSession.HasStatus(_self: Session, unit: Unit, kind: string): bool
 	return false
 end
 
+function BattleSession.FindEffect(_self: Session, unit: Unit, kind: string): Effect?
+	for _, effect in unit.Effects do
+		if effect.Kind == kind then
+			return effect
+		end
+	end
+	return nil
+end
+
 function BattleSession.HasTaunt(self: Session, unit: Unit): boolean
-	return self:HasStatus(unit, "Taunt")
+	if self:HasStatus(unit, "Taunt") then
+		return true
+	end
+	local kit = self:KitOf(unit)
+	return kit ~= nil and kit.IsTaunting ~= nil and kit.IsTaunting(self, unit)
+end
+
+function BattleSession.RemoveEffect(self: Session, unit: Unit, effect: Effect)
+	local index = table.find(unit.Effects, effect)
+	if index then
+		table.remove(unit.Effects, index)
+		self:_emit({ Type = "EffectExpired", Side = unit.Side, Slot = unit.Slot, Key = effect.Key })
+	end
 end
 
 local function removeStatus(unit: Unit, kind: string)
@@ -195,12 +350,15 @@ local function addOrRefresh(unit: Unit, effect: Effect)
 			if math.abs(effect.Amount) > math.abs(existing.Amount) then
 				existing.Amount = effect.Amount
 			end
-			existing.Fresh = true
+			existing.Fresh = effect.Fresh
+			existing.SourceSide = effect.SourceSide or existing.SourceSide
+			existing.SourceSlot = effect.SourceSlot or existing.SourceSlot
 			return
 		end
 	end
 	unit.Effects[#unit.Effects + 1] = effect
 end
+BattleSession.AddOrRefresh = addOrRefresh
 
 function BattleSession.Living(self: Session, side: number): { Unit }
 	local result = {}
@@ -212,23 +370,58 @@ function BattleSession.Living(self: Session, side: number): { Unit }
 	return result
 end
 
+-- Skill availability ------------------------------------------------------------------
+
+-- Whether a unit may pick a skill right now (energy is checked per team elsewhere).
+function BattleSession.CanUse(self: Session, unit: Unit, index: number): (boolean, string?)
+	local skill = unit.Skills[index]
+	if not skill then
+		return false, "No such skill"
+	end
+	local cooldown = unit.Cooldowns[skill.Id]
+	if cooldown and self.Round <= cooldown then
+		local left = cooldown - self.Round + 1
+		return false, if left == 1 then "Cooldown: 1 round" else `Cooldown: {left} rounds`
+	end
+	local kit = self:KitOf(unit)
+	if kit and kit.CanUse then
+		local ok, reason = kit.CanUse(self, unit, index)
+		if ok == false then
+			return false, reason
+		end
+	end
+	return true, nil
+end
+
 -- Round lifecycle -------------------------------------------------------------------
 
 function BattleSession._beginRound(self: Session)
 	self.Round += 1
-	for side, team in self.Teams do
+	for _, team in self.Teams do
 		local regen = 0
 		for _, unit in team.Units do
+			unit.DodgeRolled = false
 			if unit.Alive then
-				regen += unit.Def.EnergyRegen
+				regen += unit.EnergyRegen
 				local rolled = self.Rng:integer(unit.Base.SpeedMin, unit.Base.SpeedMax)
 				unit.Speed = math.floor(Stats.apply("SPD", rolled, self:Modifier(unit, "SPD")) + 0.5)
 				unit.Tiebreak = self.Rng:next()
 			end
 		end
+		if team.HalfRegenRound == self.Round then
+			regen = math.floor(regen / 2)
+		end
 		team.Energy = math.min(BattleSession.MAX_ENERGY, team.Energy + regen)
 		team.Actions = nil
-		local _ = side
+	end
+	-- kit: speed overrides, per-round growth, auto-triggers.
+	for _, team in self.Teams do
+		for _, unit in team.Units do
+			local kit = self:KitOf(unit)
+			if unit.Alive and kit and kit.RoundStart then
+				kit.RoundStart(self, unit)
+			end
+		end
 	end
 	self.Phase = "Choosing"
 	self:_emit({
@@ -246,27 +439,7 @@ function BattleSession._tickBurns(self: Session)
 				for _, effect in table.clone(unit.Effects) do
 					if effect.Kind == "Burn" and unit.Alive then
 						local amount = math.max(1, math.floor(unit.MaxHP * effect.Amount + 0.5))
-						local absorbed = 0
-						for _, shield in unit.Effects do
-							if shield.Kind == "Shield" and shield.Amount > 0 and amount > 0 then
-								local used = math.min(shield.Amount, amount)
-								shield.Amount -= used
-								amount -= used
-								absorbed += used
-							end
-						end
-						unit.HP = math.max(0, unit.HP - amount)
-						self:_emit({
-							Type = "Burn",
-							Side = unit.Side,
-							Slot = unit.Slot,
-							Amount = amount,
-							Absorbed = absorbed,
-							HP = unit.HP,
-						})
-						if unit.HP <= 0 then
-							self:_knockOut(unit)
-						end
+						self:_dealDamage(unit, amount, { Type = "Burn", NoReduction = true })
 					end
 				end
 			end
@@ -278,8 +451,20 @@ function BattleSession._endRound(self: Session)
 	self:_tickBurns()
 	for _, team in self.Teams do
 		for _, unit in team.Units do
+			local kit = self:KitOf(unit)
+			if unit.Alive and kit and kit.RoundEnd then
+				kit.RoundEnd(self, unit)
+			end
+		end
+	end
+	for _, team in self.Teams do
+		for _, unit in team.Units do
 			local kept = {}
 			for _, effect in unit.Effects do
+				if effect.Permanent then
+					table.insert(kept, effect)
+					continue
+				end
 				if effect.Fresh then
 					effect.Fresh = false
 				else
@@ -342,11 +527,18 @@ function BattleSession.Validate(self: Session, side: number, actions: { [number]
 		if unit.Alive then
 			local action = actions[slot]
 			if type(action) ~= "table" or type(action.Skill) ~= "number" then
-				return false, `Choose a skill for {unit.Def.Name}.`
+				return false, `Choose a skill for {unit.Name}.`
+			end
+			if action.Skill == BattleSession.REST then
+				continue
 			end
 			local skill = unit.Skills[action.Skill]
 			if not skill then
-				return false, `{unit.Def.Name} has no skill {action.Skill}.`
+				return false, `{unit.Name} has no skill {action.Skill}.`
+			end
+			local usable, reason = self:CanUse(unit, action.Skill)
+			if not usable then
+				return false, `{unit.Name} can't use {skill.Name}: {reason}.`
 			end
 			if action.Target ~= nil and (type(action.Target) ~= "number" or action.Target < 1 or action.Target > 3) then
 				return false, "Invalid target."
@@ -401,6 +593,15 @@ function BattleSession._resolveTargets(self: Session, actor: Unit, skill: Types.
 		local ally = requested and self.Teams[actor.Side].Units[requested]
 		return { if ally and ally.Alive then ally else actor }
 	end
+	-- A provoke on the actor beats any taunt.
+	for _, effect in actor.Effects do
+		if effect.Kind == "Provoke" and effect.SourceSide and effect.SourceSlot then
+			local source = self.Teams[effect.SourceSide].Units[effect.SourceSlot]
+			if source and source.Alive then
+				return { source }
+			end
+		end
+	end
 	for _, enemy in self.Teams[enemySide].Units do
 		if enemy.Alive and self:HasTaunt(enemy) then
 			return { enemy }
@@ -418,6 +619,75 @@ function BattleSession._revive(self: Session, unit: Unit, health: number)
 	self:_emit({ Type = "Revive", Side = unit.Side, Slot = unit.Slot, HP = unit.HP })
 end
 
+local DEBUFF_KINDS: { [string]: boolean } = { Burn = true, Stun = true, Bleed = true, Provoke = true }
+
+function BattleSession._isDebuff(_self: Session, source: Unit, recipient: Unit, spec: Types.EffectSpec): boolean
+	if recipient.Side == source.Side then
+		return false
+	end
+	if spec.Kind == "StatMod" then
+		return (spec.Amount or 0) < 0
+	end
+	return DEBUFF_KINDS[spec.Kind] == true
+end
+
+function BattleSession._missed(self: Session, recipient: Unit, key: string, reason: string)
+	self:_emit({ Type = "EffectMissed", Side = recipient.Side, Slot = recipient.Slot, Key = key, Reason = reason })
+end
+
+function BattleSession._applyBleed(self: Session, source: Unit, recipient: Unit, spec: Types.EffectSpec, key: string)
+	local existing = self:FindEffect(recipient, "Bleed")
+	local immune = self:FindEffect(recipient, "BleedImmune")
+	local count, potency
+	if existing then
+		count = 1
+		potency = BattleSession.BLEED_POTENCY_STEP
+	else
+		count = spec.Count or 2
+		potency = spec.Amount or BattleSession.BLEED_POTENCY_STEP
+		count = Stats.debuffTurns(count, self:Effective(source, "EFF"), self:Effective(recipient, "RES"))
+	end
+	if immune and immune.Count then
+		local blocked = math.min(immune.Count, count)
+		immune.Count -= blocked
+		count -= blocked
+		if immune.Count <= 0 then
+			self:RemoveEffect(recipient, immune)
+		end
+	end
+	if count <= 0 then
+		self:_missed(recipient, key, "BleedImmune")
+		return
+	end
+	local bleed: Effect
+	if existing then
+		existing.Amount = math.min(BattleSession.BLEED_POTENCY_CAP, existing.Amount + potency)
+		existing.Count = math.min(BattleSession.BLEED_COUNT_CAP, (existing.Count or 0) + count)
+		bleed = existing
+	else
+		bleed = {
+			Kind = "Bleed",
+			Key = "bleed",
+			Amount = math.min(BattleSession.BLEED_POTENCY_CAP, potency),
+			Count = math.min(BattleSession.BLEED_COUNT_CAP, count),
+			Turns = 1,
+			Debuff = true,
+			Fresh = true,
+			Permanent = true,
+		}
+		table.insert(recipient.Effects, bleed)
+	end
+	self:_emit({
+		Type = "Effect",
+		Kind = "Bleed",
+		Side = recipient.Side,
+		Slot = recipient.Slot,
+		Key = key,
+		Amount = bleed.Amount,
+		Count = bleed.Count,
+	})
+end
+
 function BattleSession._applyEffect(self: Session, source: Unit, recipient: Unit, spec: Types.EffectSpec, key: string)
 	if spec.Kind == "Revive" then
 		if not recipient.Alive and not recipient.ReviveUsed then
@@ -429,35 +699,33 @@ function BattleSession._applyEffect(self: Session, source: Unit, recipient: Unit
 		return
 	end
 	local hostile = recipient.Side ~= source.Side
+	if self:_isDebuff(source, recipient, spec) then
+		local kit = self:KitOf(recipient)
+		if kit and kit.ImmuneToDebuffs and kit.ImmuneToDebuffs(self, recipient) then
+			self:_missed(recipient, key, "DebuffImmune")
+			return
+		end
+	end
 	local eff = self:Effective(source, "EFF")
 	local res = self:Effective(recipient, "RES")
 	local chance = spec.Chance
 	if spec.Kind == "Stun" then
 		if self:HasStatus(recipient, "StunImmune") or self:HasStatus(recipient, "Stun") then
-			self:_emit({
-				Type = "EffectMissed",
-				Side = recipient.Side,
-				Slot = recipient.Slot,
-				Key = key,
-				Reason = "Immune",
-			})
+			self:_missed(recipient, key, "Immune")
 			return
 		end
-		chance = math.clamp((chance or 1) * math.clamp(1 + eff - res, 0.5, 1.5), 0, 1)
-	elseif chance and spec.Scale == "Chance" and hostile then
+		if not spec.Flat then
+			chance = math.clamp((chance or 1) * math.clamp(1 + eff - res, 0.5, 1.5), 0, 1)
+		end
+	elseif chance and spec.Scale == "Chance" and hostile and not spec.Flat then
 		chance = math.clamp(chance * math.clamp(1 + eff - res, 0.5, 1.5), 0, 1)
 	end
 	if chance and not self.Rng:chance(chance) then
-		self:_emit({
-			Type = "EffectMissed",
-			Side = recipient.Side,
-			Slot = recipient.Slot,
-			Key = key,
-			Reason = "Resisted",
-		})
+		self:_missed(recipient, key, "Resisted")
 		return
 	end
 	local event: Event = { Type = "Effect", Kind = spec.Kind, Side = recipient.Side, Slot = recipient.Slot, Key = key }
+	local fresh = not spec.ThisRound
 
 	if spec.Kind == "Burn" then
 		local amount = spec.Amount or 0.05
@@ -504,6 +772,31 @@ function BattleSession._applyEffect(self: Session, source: Unit, recipient: Unit
 		event.SourceSide = source.Side
 		self:_emit(event)
 		return
+	elseif spec.Kind == "Bleed" then
+		self:_applyBleed(source, recipient, spec, key)
+		return
+	elseif spec.Kind == "StripBuffs" then
+		local removed = {}
+		for index = #recipient.Effects, 1, -1 do
+			local effect = recipient.Effects[index]
+			local strip
+			if spec.Stat == "DEF" then
+				strip = effect.Kind == "StatMod" and effect.Stat == "DEF" and effect.Amount > 0
+			else
+				strip = (effect.Kind == "StatMod" and effect.Stat == "ATK" and effect.Amount > 0)
+					or (effect.Kind == "DamageReduction" and not effect.Unremovable)
+			end
+			if strip then
+				table.insert(removed, effect.Key)
+				table.remove(recipient.Effects, index)
+			end
+		end
+		if #removed == 0 then
+			return
+		end
+		event.Removed = removed
+		self:_emit(event)
+		return
 	end
 
 	if spec.Kind == "StatMod" then
@@ -529,7 +822,7 @@ function BattleSession._applyEffect(self: Session, source: Unit, recipient: Unit
 			if math.abs(amount) > math.abs(existing.Amount) then
 				existing.Amount = amount
 			end
-			existing.Fresh = true
+			existing.Fresh = fresh
 		else
 			local newEffect = {
 				Kind = "StatMod",
@@ -538,7 +831,7 @@ function BattleSession._applyEffect(self: Session, source: Unit, recipient: Unit
 				Amount = amount,
 				Turns = turns,
 				Debuff = debuff,
-				Fresh = true,
+				Fresh = fresh,
 			} :: any -- old solver cannot relate this literal to Effect; fields match the type above
 			recipient.Effects[#recipient.Effects + 1] = newEffect
 		end
@@ -546,32 +839,39 @@ function BattleSession._applyEffect(self: Session, source: Unit, recipient: Unit
 		event.Amount = amount
 		event.Turns = turns
 		event.Debuff = debuff
-	elseif spec.Kind == "Taunt" or spec.Kind == "Shield" then
+	elseif
+		spec.Kind == "Taunt"
+		or spec.Kind == "Shield"
+		or spec.Kind == "DamageReduction"
+		or spec.Kind == "Provoke"
+	then
 		local turns = spec.Turns or 1
-		local amount = if spec.Kind == "Shield" then math.floor(recipient.MaxHP * (spec.Amount or 0) + 0.5) else 0
-		local found = false
-		for _, effect in recipient.Effects do
-			if effect.Key == key then
-				effect.Turns = math.max(effect.Turns, turns)
-				effect.Amount = math.max(effect.Amount, amount)
-				effect.Fresh = true
-				found = true
-			end
+		local amount = 0
+		if spec.Kind == "Shield" then
+			amount = math.floor(recipient.MaxHP * (spec.Amount or 0) + 0.5)
+		elseif spec.Kind == "DamageReduction" then
+			amount = spec.Amount or 0
 		end
-		if not found then
-			local newEffect: Effect = {
-				Kind = if spec.Kind == "Taunt" then "Taunt" else "Shield",
-				Key = key,
-				Amount = amount,
-				Turns = turns,
-				Debuff = false,
-				Fresh = true,
-			}
-			recipient.Effects[#recipient.Effects + 1] = newEffect
-		end
+		addOrRefresh(recipient, {
+			Kind = spec.Kind :: any,
+			Key = key,
+			Amount = amount,
+			Turns = turns,
+			Debuff = spec.Kind == "Provoke",
+			Fresh = fresh,
+			SourceSide = if spec.Kind == "Provoke" then source.Side else nil,
+			SourceSlot = if spec.Kind == "Provoke" then source.Slot else nil,
+		})
 		event.Amount = amount
 		event.Turns = turns
+		if spec.Kind == "Provoke" then
+			event.SourceSide = source.Side
+			event.SourceSlot = source.Slot
+		end
 	elseif spec.Kind == "Heal" then
+		if recipient.NoHeal then
+			return
+		end
 		local amount = math.floor(recipient.MaxHP * (spec.Amount or 0) + 0.5)
 		local before = recipient.HP
 		recipient.HP = math.min(recipient.MaxHP, recipient.HP + amount)
@@ -587,7 +887,12 @@ function BattleSession._applyEffect(self: Session, source: Unit, recipient: Unit
 			local effect = recipient.Effects[index]
 			if effect.Debuff then
 				table.insert(removed, effect.Key)
-				table.remove(recipient.Effects, index)
+				-- Cleanse takes bleed count, not potency.
+				if effect.Kind == "Bleed" and (effect.Count or 0) > 1 then
+					effect.Count = (effect.Count or 0) - 1
+				else
+					table.remove(recipient.Effects, index)
+				end
 				remaining -= 1
 			end
 		end
@@ -637,64 +942,173 @@ function BattleSession.HasFallenAlly(self: Session, side: number): boolean
 	return false
 end
 
-function BattleSession._knockOut(self: Session, unit: Unit)
+function BattleSession._knockOut(self: Session, unit: Unit, reason: string?)
 	unit.HP = 0
 	unit.Alive = false
 	unit.Effects = {}
-	self:_emit({ Type = "KO", Side = unit.Side, Slot = unit.Slot })
+	self:_emit({ Type = "KO", Side = unit.Side, Slot = unit.Slot, Reason = reason })
 	local passive = unit.Passive
 	if passive and passive.Revive and not unit.ReviveUsed then
 		self:_revive(unit, passive.Revive.Health)
 	end
 end
 
-export type HitOptions = { Single: boolean, IsCounter: boolean? }
+export type DamageInfo = {
+	Type: "Damage" | "Burn" | "Bleed",
+	Source: Unit?,
+	Pierce: boolean?,
+	NoReduction: boolean?,
+	Crit: boolean?,
+	Counter: boolean?,
+}
 
-function BattleSession._hit(self: Session, attacker: Unit, target: Unit, multiplier: number, options: HitOptions)
-	if not (attacker.Alive and target.Alive) then
-		return
+-- Applies damage already reduced by DEF: records it, then damage reduction, shields and kit HP
+-- clamps. Emits one event of info.Type. Returns true if the target is still standing.
+function BattleSession._dealDamage(self: Session, target: Unit, raw: number, info: DamageInfo): boolean
+	target.DamageTaken[self.Round] = (target.DamageTaken[self.Round] or 0) + raw
+	local amount = raw
+	local reduced = 0
+	if not info.NoReduction then
+		local reduction = self:DamageReduction(target, info.Pierce)
+		if reduction > 0 then
+			amount = math.max(1, math.floor(raw * (1 - reduction) + 0.5))
+			reduced = raw - amount
+		end
 	end
-	local crit = self.Rng:chance(self:Effective(attacker, "CritRate"))
-	local critMultiplier = if crit then self:Effective(attacker, "CritDamage") else 1
-	local overtime = 1 + math.max(0, self.Round - BattleSession.OVERTIME_START + 1) * BattleSession.OVERTIME_STEP
-	local amount = Stats.damage(
-		self:Effective(attacker, "ATK"),
-		multiplier * overtime,
-		self:Effective(target, "DEF"),
-		critMultiplier
-	)
-
 	local absorbed = 0
-	local remaining = amount
 	for _, effect in target.Effects do
-		if effect.Kind == "Shield" and effect.Amount > 0 and remaining > 0 then
-			local used = math.min(effect.Amount, remaining)
+		if effect.Kind == "Shield" and effect.Amount > 0 and amount > 0 then
+			local used = math.min(effect.Amount, amount)
 			effect.Amount -= used
-			remaining -= used
+			amount -= used
 			absorbed += used
 		end
 	end
-	target.HP = math.max(0, target.HP - remaining)
-	self:_emit({
-		Type = "Damage",
+	local newHP = math.max(0, target.HP - amount)
+	local kit = self:KitOf(target)
+	if kit and kit.ClampHP then
+		newHP = kit.ClampHP(self, target, newHP)
+	end
+	target.HP = newHP
+	local event: Event = {
+		Type = info.Type,
 		Side = target.Side,
 		Slot = target.Slot,
-		SourceSide = attacker.Side,
-		SourceSlot = attacker.Slot,
-		Amount = remaining,
+		Amount = amount,
 		Absorbed = absorbed,
-		Crit = crit,
-		Counter = options.IsCounter == true,
+		Reduced = reduced,
 		HP = target.HP,
-	})
+	}
+	if info.Type == "Damage" and info.Source then
+		event.SourceSide = info.Source.Side
+		event.SourceSlot = info.Source.Slot
+		event.Crit = info.Crit == true
+		event.Counter = info.Counter == true
+	end
+	self:_emit(event)
 	if target.HP <= 0 then
 		self:_knockOut(target)
+		return false
+	end
+	if kit and kit.AfterDamage then
+		kit.AfterDamage(self, target)
+	end
+	return true
+end
+
+-- Rolls the target's evasion if this is the first attack aimed at it this round.
+-- Returns false when the attack is dodged. Allies never dodge each other.
+function BattleSession._attackLands(self: Session, attacker: Unit, target: Unit): boolean
+	if attacker.Side == target.Side or not target.Alive or target.DodgeRolled then
+		return true
+	end
+	target.DodgeRolled = true
+	local evasion = self:EvasionOf(target)
+	if evasion > 0 and self.Rng:chance(evasion) then
+		self:_emit({ Type = "Dodge", Side = target.Side, Slot = target.Slot })
+		return false
+	end
+	return true
+end
+
+-- Damage multiplier from the attacker's kit (next-round bonuses, stance bonuses).
+function BattleSession._damageBonus(self: Session, attacker: Unit, skill: Types.SkillDef?): number
+	local kit = self:KitOf(attacker)
+	if kit and kit.DamageBonus then
+		return kit.DamageBonus(self, attacker, skill)
+	end
+	return 1
+end
+
+-- Bleed fires once on each damaging hit taken, then loses a count.
+function BattleSession._fireBleed(self: Session, target: Unit)
+	local bleed = self:FindEffect(target, "Bleed")
+	if not bleed or not target.Alive then
 		return
+	end
+	local amount = math.max(1, math.floor(target.MaxHP * bleed.Amount + 0.5))
+	bleed.Count = (bleed.Count or 1) - 1
+	if bleed.Count <= 0 then
+		self:RemoveEffect(target, bleed)
+	end
+	self:_dealDamage(target, amount, { Type = "Bleed" })
+end
+
+-- One hit. Returns true if it landed (not dodged).
+function BattleSession._hit(
+	self: Session,
+	attacker: Unit,
+	target: Unit,
+	multiplier: number,
+	options: HitOptions
+): boolean
+	if not (attacker.Alive and target.Alive) then
+		return false
+	end
+	if not options.SkipDodge and not self:_attackLands(attacker, target) then
+		return false
+	end
+	local skill = options.Skill
+	local overtime = 1 + math.max(0, self.Round - BattleSession.OVERTIME_START + 1) * BattleSession.OVERTIME_STEP
+	local bonus = self:_damageBonus(attacker, skill)
+	local crit = false
+	local amount
+	if skill and skill.PercentMaxHP and not options.IsCounter then
+		amount = math.max(1, math.floor(target.MaxHP * skill.PercentMaxHP * overtime * bonus + 0.5))
+	else
+		if not (skill and skill.NoCrit) then
+			crit = self.Rng:chance(math.clamp(self:CritChance(attacker, target) + (options.CritBonus or 0), 0, 1))
+		end
+		local critMultiplier = if crit
+			then self:Effective(attacker, "CritDamage") + (options.CritDamageBonus or 0)
+			else 1
+		local defense = self:Effective(target, "DEF") * (1 - (skill and skill.IgnoreDef or 0))
+		amount = Stats.damage(self:Effective(attacker, "ATK"), multiplier * overtime * bonus, defense, critMultiplier)
+	end
+
+	local standing = self:_dealDamage(target, amount, {
+		Type = "Damage",
+		Source = attacker,
+		Pierce = skill ~= nil and skill.Pierce == true,
+		Crit = crit,
+		Counter = options.IsCounter == true,
+	})
+	if not standing or attacker.Side == target.Side then
+		return true
+	end
+
+	local targetKit = self:KitOf(target)
+	if targetKit and targetKit.OnHitTaken then
+		targetKit.OnHitTaken(self, target, attacker)
+	end
+	self:_fireBleed(target)
+	if not target.Alive then
+		return true
 	end
 
 	local passive = target.Passive
-	if not passive or attacker.Side == target.Side then
-		return
+	if not passive then
+		return true
 	end
 	if passive.OnHit and (not passive.OnHit.WhileTaunting or self:HasTaunt(target)) then
 		for _, spec in passive.OnHit.Effects do
@@ -715,6 +1129,60 @@ function BattleSession._hit(self: Session, attacker: Unit, target: Unit, multipl
 			)
 		end
 	end
+	return true
+end
+
+-- Counter attack dealing a share of the target's max HP (ignores DEF, no crit).
+function BattleSession.CounterPercent(self: Session, attacker: Unit, target: Unit, fraction: number)
+	if not (attacker.Alive and target.Alive) or not self:_attackLands(attacker, target) then
+		return
+	end
+	local amount = math.max(1, math.floor(target.MaxHP * fraction * self:_damageBonus(attacker, nil) + 0.5))
+	if self:_dealDamage(target, amount, { Type = "Damage", Source = attacker, Counter = true }) then
+		self:_fireBleed(target)
+	end
+end
+
+-- Multi-hit move on one target. Returns true if any hit landed.
+function BattleSession._combo(
+	self: Session,
+	unit: Unit,
+	target: Unit,
+	skill: Types.SkillDef,
+	firstLands: boolean
+): boolean
+	local combo = assert(skill.Combo, "combo skill without Combo data")
+	local multiplier = skill.Multiplier or 0
+	local total = combo.Guaranteed + #combo.LandScale
+	local landed = 0
+	for hit = 1, total do
+		if not (unit.Alive and target.Alive) then
+			break
+		end
+		local extra = hit > combo.Guaranteed
+		if extra then
+			local chance = (self:CritChance(unit, target) + combo.CritBonus) * combo.LandScale[hit - combo.Guaranteed]
+			if not self.Rng:chance(math.clamp(chance, 0, 1)) then
+				break
+			end
+		end
+		if hit == 1 and not firstLands then
+			continue
+		end
+		if
+			self:_hit(unit, target, multiplier, {
+				Single = true,
+				Skill = skill,
+				SkipDodge = hit == 1,
+				CritBonus = if extra then combo.CritBonus else 0,
+				CritDamageBonus = if extra then combo.CritDamageBonus else 0,
+			})
+		then
+			landed += 1
+		end
+	end
+	self:_emit({ Type = "Combo", Side = unit.Side, Slot = unit.Slot, Hits = landed })
+	return landed > 0
 end
 
 function BattleSession._perform(self: Session, unit: Unit, action: Types.Action)
@@ -733,12 +1201,45 @@ function BattleSession._perform(self: Session, unit: Unit, action: Types.Action)
 		self:_emit({ Type = "Stunned", Side = unit.Side, Slot = unit.Slot })
 		return
 	end
-	local skill = unit.Skills[action.Skill] or unit.Skills[1]
-	if skill.Cost > team.Energy then
-		self:_emit({ Type = "Fallback", Side = unit.Side, Slot = unit.Slot, Wanted = skill.Id })
-		skill = unit.Skills[1]
+	local kit = self:KitOf(unit)
+	local index = if unit.Skills[action.Skill] then action.Skill else 1
+	local skill = unit.Skills[index]
+	-- kit: a forced move (auto-triggered unique) replaces the chosen one and costs nothing.
+	local forced = kit and kit.ForcedSkill and kit.ForcedSkill(self, unit)
+	if forced then
+		skill = forced
+		index = 0
+	else
+		if action.Skill == BattleSession.REST then
+			self:_emit({ Type = "Rest", Side = unit.Side, Slot = unit.Slot })
+			return
+		end
+		local usable, reason = self:CanUse(unit, index)
+		if not usable or skill.Cost > team.Energy then
+			self:_emit({
+				Type = "Fallback",
+				Side = unit.Side,
+				Slot = unit.Slot,
+				Wanted = skill.Id,
+				Reason = if usable then nil else reason,
+			})
+			index = 1
+			skill = unit.Skills[1]
+			if skill.Cost > team.Energy then
+				self:_emit({ Type = "Rest", Side = unit.Side, Slot = unit.Slot })
+				return
+			end
+		end
+		team.Energy -= skill.Cost
 	end
-	team.Energy -= skill.Cost
+	-- kit: may stop the move (sealed, cancelled) after emitting its own events.
+	if kit and kit.BeforeAction and kit.BeforeAction(self, unit, skill) == false then
+		return
+	end
+	unit.History[self.Round] = index
+	if skill.Kind == "Ultimate" then
+		unit.UltimateUsed = true
+	end
 	local targets = self:_resolveTargets(unit, skill, action.Target)
 	self:_emit({
 		Type = "Action",
@@ -756,14 +1257,50 @@ function BattleSession._perform(self: Session, unit: Unit, action: Types.Action)
 		end)(),
 		Energy = team.Energy,
 	})
-	if skill.Multiplier then
-		for _, target in targets do
-			self:_hit(unit, target, skill.Multiplier, { Single = skill.Target == "Enemy" })
+	if skill.Custom then
+		assert(kit and kit.Cast, `{skill.Id} needs a kit Cast hook`)
+		kit.Cast(self, unit, skill, targets)
+	else
+		self:_resolveSkill(unit, skill, targets)
+	end
+	if skill.Cooldown then
+		unit.Cooldowns[skill.Id] = self.Round + skill.Cooldown
+	end
+	if unit.Alive and kit and kit.AfterSkill then
+		kit.AfterSkill(self, unit, skill, index, targets)
+	end
+	unit.Uses[skill.Id] = (unit.Uses[skill.Id] or 0) + 1
+end
+
+-- Default skill resolution: dodge rolls, pre-effects, hits, follow-ups, then effects
+-- on every target the attack reached.
+function BattleSession._resolveSkill(self: Session, unit: Unit, skill: Types.SkillDef, targets: { Unit })
+	local reached = {}
+	for _, target in targets do
+		local lands = self:_attackLands(unit, target)
+		if lands or skill.Combo then
+			if lands and skill.PreEffects then
+				for _, spec in skill.PreEffects do
+					self:_applyEffect(unit, target, spec, `{skill.Id}:{spec.Stat or spec.Kind}`)
+				end
+			end
+			if skill.Combo then
+				lands = self:_combo(unit, target, skill, lands)
+			elseif skill.Multiplier or skill.PercentMaxHP then
+				self:_hit(unit, target, skill.Multiplier or 0, {
+					Single = skill.Target == "Enemy",
+					Skill = skill,
+					SkipDodge = true,
+				})
+			end
+		end
+		if lands then
+			table.insert(reached, target)
 		end
 	end
 	local followUp = skill.FollowUp
 	if followUp and unit.Alive then
-		for _, target in targets do
+		for _, target in reached do
 			if target.Alive and target.Side ~= unit.Side and target.HP / target.MaxHP < followUp.Threshold then
 				self:_emit({ Type = "FollowUp", Side = unit.Side, Slot = unit.Slot })
 				self:_hit(unit, target, followUp.Multiplier, { Single = false })
@@ -773,7 +1310,7 @@ function BattleSession._perform(self: Session, unit: Unit, action: Types.Action)
 	if unit.Alive then
 		local effects: { Types.EffectSpec } = skill.Effects or {}
 		for _, spec in effects do
-			for _, recipient in self:_recipients(unit, spec, targets, nil) do
+			for _, recipient in self:_recipients(unit, spec, reached, nil) do
 				self:_applyEffect(unit, recipient, spec, `{skill.Id}:{spec.Stat or spec.Kind}`)
 			end
 		end
@@ -785,12 +1322,17 @@ end
 function BattleSession.Resolve(self: Session): { Event }
 	assert(self:IsReady(), "Both sides must submit before resolving")
 	local queue = {}
-	for side, team in self.Teams do
+	for _, team in self.Teams do
 		local actions = assert(team.Actions, "missing submitted actions")
 		for slot, unit in team.Units do
 			if unit.Alive then
 				local action = actions[slot]
 				local skill = unit.Skills[action.Skill] or unit.Skills[1]
+				local kit = self:KitOf(unit)
+				local forced = kit and kit.ForcedSkill and kit.ForcedSkill(self, unit)
+				if forced then
+					skill = forced
+				end
 				table.insert(queue, {
 					Unit = unit,
 					Action = action,
@@ -798,7 +1340,6 @@ function BattleSession.Resolve(self: Session): { Event }
 				})
 			end
 		end
-		local _ = side
 	end
 	table.sort(queue, function(a, b)
 		if a.Speed ~= b.Speed then
@@ -816,7 +1357,7 @@ function BattleSession.Resolve(self: Session): { Event }
 	end
 	if self.Phase ~= "Finished" then
 		self:_endRound()
-		-- Burn can finish a team off at the end of the round.
+		-- Burn (or a failed seal) can finish a team off at the end of the round.
 		local knockedOut = self:_checkWinner()
 		if not knockedOut and self.Round >= self.MaxRounds then
 			local a, b = self:_hpFraction(1), self:_hpFraction(2)
@@ -845,10 +1386,13 @@ function BattleSession.Snapshot(self: Session, viewSide: number?)
 					Amount = effect.Amount,
 					Turns = effect.Turns,
 					Debuff = effect.Debuff,
+					Permanent = effect.Permanent,
+					Count = effect.Count,
 				})
 			end
 			local skills = {}
 			for index, skill in unit.Skills do
+				local usable, reason = self:CanUse(unit, index)
 				skills[index] = {
 					Id = skill.Id,
 					Name = skill.Name,
@@ -856,19 +1400,31 @@ function BattleSession.Snapshot(self: Session, viewSide: number?)
 					Cost = skill.Cost,
 					Target = skill.Target,
 					Description = skill.Description,
+					Usable = usable,
+					Reason = reason,
 				}
+			end
+			local kit = self:KitOf(unit)
+			local status = if kit and kit.Status and unit.Alive then kit.Status(self, unit) else {}
+			local evasion = self:EvasionOf(unit)
+			if unit.Alive and evasion > 0 then
+				table.insert(
+					status,
+					`Evasion {math.floor(evasion * 100 + 0.5)}% · dodge {if unit.DodgeRolled then "used" else "ready"}`
+				)
 			end
 			local showSpeed = viewSide == nil or viewSide == side
 			units[slot] = {
 				Id = unit.Def.Id,
-				Name = unit.Def.Name,
-				Class = unit.Def.Class,
+				Name = unit.Name,
+				Class = unit.Class,
 				Rarity = unit.Def.Rarity,
 				HP = unit.HP,
 				MaxHP = unit.MaxHP,
 				Alive = unit.Alive,
 				Speed = if showSpeed then unit.Speed else nil,
 				SpeedRange = { Min = unit.Base.SpeedMin, Max = unit.Base.SpeedMax },
+				EnergyRegen = unit.EnergyRegen,
 				Stats = {
 					ATK = self:Effective(unit, "ATK"),
 					DEF = self:Effective(unit, "DEF"),
@@ -881,6 +1437,8 @@ function BattleSession.Snapshot(self: Session, viewSide: number?)
 				Skills = skills,
 				Passive = unit.Passive and { Name = unit.Passive.Name, Description = unit.Passive.Description } or nil,
 				ReviveUsed = unit.ReviveUsed,
+				Shadow = unit.IsShadow,
+				Status = status,
 			}
 		end
 		teams[side] = { Units = units, Energy = team.Energy, Submitted = team.Actions ~= nil }

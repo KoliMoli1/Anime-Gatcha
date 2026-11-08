@@ -76,18 +76,26 @@ end
 local function pickSkill(session: Session, unit: Unit, budget: number, allies: { Unit }, enemies: { Unit }): number
 	local function can(index: number): boolean
 		local skill = unit.Skills[index]
-		if skill.Cost > budget then
+		if not skill or skill.Cost > budget or not session:CanUse(unit, index) then
 			return false
 		end
 		-- A revive is wasted with nobody to bring back.
 		return not revives(skill) or session:HasFallenAlly(unit.Side)
 	end
+	local kit = session:KitOf(unit)
+	if kit and kit.AIChoose then
+		local index = kit.AIChoose(session, unit, can)
+		if index and can(index) then
+			return index
+		end
+		return if can(1) then 1 else BattleSession.REST
+	end
 	for index = 3, 2, -1 do
-		if revives(unit.Skills[index]) and can(index) then
+		if unit.Skills[index] and revives(unit.Skills[index]) and can(index) then
 			return index
 		end
 	end
-	local class = unit.Def.Class
+	local class = unit.Class
 	if class == "Defense" then
 		if can(3) and teamHpFraction(allies) < 0.55 then
 			return 3
@@ -127,9 +135,14 @@ local function pickSkill(session: Session, unit: Unit, budget: number, allies: {
 	return 1
 end
 
-local function pickTarget(session: Session, skill: Types.SkillDef, enemies: { Unit }): number?
+local function pickTarget(session: Session, unit: Unit, skill: Types.SkillDef, enemies: { Unit }): number?
 	if skill.Target ~= "Enemy" then
 		return nil
+	end
+	local kit = session:KitOf(unit)
+	local chosen = kit and kit.AITarget and kit.AITarget(session, unit, skill, enemies)
+	if chosen then
+		return chosen.Slot
 	end
 	local lowersAttack = false
 	local effects: { Types.EffectSpec } = skill.Effects or {}
@@ -148,8 +161,16 @@ function BattleAI.choose(session: Session, side: number, rng: Rng.Rng, options: 
 	local enemies = session:Living(3 - side)
 	local budget = session.Teams[side].Energy
 	local ordered = table.clone(allies)
+	-- Kits can claim the pool first (big finishers that need the whole pool).
+	local function rank(unit: Unit): number
+		local kit = session:KitOf(unit)
+		if kit and kit.AIFirst and kit.AIFirst(session, unit) then
+			return 0
+		end
+		return PRIORITY[unit.Class] or 9
+	end
 	table.sort(ordered, function(a, b)
-		return (PRIORITY[a.Def.Class] or 9) < (PRIORITY[b.Def.Class] or 9)
+		return rank(a) < rank(b)
 	end)
 
 	local actions: { [number]: Types.Action } = {}
@@ -158,17 +179,21 @@ function BattleAI.choose(session: Session, side: number, rng: Rng.Rng, options: 
 		if randomness > 0 and rng:chance(randomness) then
 			local affordable = {}
 			for i, skill in unit.Skills do
-				if skill.Cost <= budget then
+				if skill.Cost <= budget and session:CanUse(unit, i) then
 					table.insert(affordable, i)
 				end
 			end
-			index = affordable[rng:integer(1, #affordable)]
+			index = if #affordable > 0 then affordable[rng:integer(1, #affordable)] else BattleSession.REST
 		else
 			index = pickSkill(session, unit, budget, allies, enemies)
 		end
 		local skill = unit.Skills[index]
+		if not skill then
+			actions[unit.Slot] = { Skill = BattleSession.REST }
+			continue
+		end
 		budget -= skill.Cost
-		local target = pickTarget(session, skill, enemies)
+		local target = pickTarget(session, unit, skill, enemies)
 		if randomness > 0 and skill.Target == "Enemy" and rng:chance(randomness) then
 			target = enemies[rng:integer(1, #enemies)].Slot
 		end

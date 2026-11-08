@@ -61,14 +61,23 @@ end
 
 function BattleController.chooseSkill(slot: number, index: number)
 	local unit = State.unit(ownSide(), slot)
+	if index == State.REST and unit and unit.Alive and State.phase() == "Choosing" then
+		setAction(slot, { Skill = State.REST })
+		return
+	end
 	local skill = unit and unit.Skills[index]
 	if not skill or not unit.Alive or State.phase() ~= "Choosing" then
+		return
+	end
+	if skill.Usable == false then
+		State.hint(`{skill.Name} can't be used: {skill.Reason or "not available"}.`)
 		return
 	end
 	local snapshot = State.snapshot()
 	local energy = snapshot.Teams[ownSide()].Energy
 	local existing = State.actions()[slot]
-	local otherCost = State.plannedCost() - (if existing then unit.Skills[existing.Skill].Cost else 0)
+	local existingSkill = existing and unit.Skills[existing.Skill]
+	local otherCost = State.plannedCost() - (if existingSkill then existingSkill.Cost else 0)
 	if otherCost + skill.Cost > energy then
 		State.hint(`Not enough energy for {skill.Name} ({skill.Cost}). Change another move or pick a cheaper skill.`)
 		return

@@ -8,6 +8,8 @@ local order = {
 	"GachaService",
 	"BattleService",
 	"PvPQueueService",
+	"HubService",
+	"ZoneService",
 	"AdminService",
 }
 
