@@ -5,6 +5,7 @@
 local Types = require("../Types")
 local Loadout = require("./Loadout")
 local BattleRewardRules = require("./BattleRewardRules")
+local Summon = require("./Summon")
 
 local Schema = {}
 
@@ -14,6 +15,9 @@ Schema.STARTER_TEAM = { "TrainingAttack", "TrainingDefense", "TrainingSupport" }
 
 export type CharacterEntry = { Dupes: number, ObtainedAt: number }
 export type ItemEntry = { ObtainedAt: number }
+export type HistoryEntry = { At: number, Banner: string, Kind: string, Id: string, Rarity: number }
+
+Schema.HISTORY_SIZE = 50
 
 export type Data = {
 	Version: number,
@@ -23,7 +27,11 @@ export type Data = {
 	Characters: { [string]: CharacterEntry },
 	Items: { [string]: ItemEntry },
 	Team: { Types.TeamSlot },
-	Pity: { [string]: number },
+	-- Per PityGroup (see Content/Banners).
+	Pity: { [string]: Summon.PityState },
+	SelectorTickets: { [string]: number },
+	-- Newest last, capped at HISTORY_SIZE: the player-facing summon log.
+	SummonHistory: { HistoryEntry },
 	Rank: { Season: number, Rank: number, Points: number },
 	Record: { Wins: number, Losses: number, Draws: number },
 	Quests: { [string]: any },
@@ -59,6 +67,8 @@ function Schema.default(now: number, characters: { [string]: Types.CharacterDef 
 		Items = {},
 		Team = starterTeam(),
 		Pity = {},
+		SelectorTickets = {},
+		SummonHistory = {},
 		Rank = { Season = 0, Rank = 1, Points = 0 },
 		Record = { Wins = 0, Losses = 0, Draws = 0 },
 		Quests = {},
@@ -144,6 +154,31 @@ function Schema.sanitize(
 		end
 	end
 
+	local pity = {}
+	if type(data.Pity) == "table" then
+		for group, raw in data.Pity do
+			if type(group) == "string" then
+				pity[group] = Summon.sanitizePity(raw)
+			end
+		end
+	end
+	data.Pity = pity
+	local tickets = {}
+	if type(data.SelectorTickets) == "table" then
+		for group, count in data.SelectorTickets do
+			if type(group) == "string" then
+				tickets[group] = nonNegativeInt(count, 0)
+			end
+		end
+	end
+	data.SelectorTickets = tickets
+	if type(data.SummonHistory) ~= "table" then
+		data.SummonHistory = {}
+	end
+	while #data.SummonHistory > Schema.HISTORY_SIZE do
+		table.remove(data.SummonHistory, 1)
+	end
+
 	local ok = Loadout.validateTeam(data.Team, data.Characters, data.Items, characters, items)
 	if not ok then
 		-- Keep the characters if possible and drop items; otherwise fall back to starters.
@@ -189,9 +224,47 @@ function Schema.grantCharacter(data: Data, def: Types.CharacterDef, now: number)
 	return "Overflow", coins
 end
 
+-- Applies a pulled item: new, or a duplicate that turns into Shards for the Shard Shop.
+-- Returns "New" | "Duplicate" and the shards granted.
+function Schema.grantItem(data: Data, item: Types.ItemDef, now: number): (string, number)
+	if not data.Items[item.Id] then
+		data.Items[item.Id] = { ObtainedAt = now }
+		return "New", 0
+	end
+	local shards = Summon.ITEM_SHARDS[item.Stars] or 0
+	data.Shards += shards
+	return "Duplicate", shards
+end
+
+-- The pity entry for a PityGroup, created on first use.
+function Schema.pityFor(data: Data, group: string): Summon.PityState
+	local state = data.Pity[group]
+	if not state then
+		state = Summon.newPity()
+		data.Pity[group] = state
+	end
+	return state
+end
+
+function Schema.recordSummon(data: Data, entry: HistoryEntry)
+	table.insert(data.SummonHistory, entry)
+	while #data.SummonHistory > Schema.HISTORY_SIZE do
+		table.remove(data.SummonHistory, 1)
+	end
+end
+
 -- Total spendable gems (earned are spent first).
 function Schema.totalGems(data: Data): number
 	return data.Gems.Earned + data.Gems.Paid
+end
+
+-- Players whose policy restricts paid random items may only summon with earned gems.
+function Schema.spendEarnedGems(data: Data, amount: number): boolean
+	if data.Gems.Earned < amount then
+		return false
+	end
+	data.Gems.Earned -= amount
+	return true
 end
 
 function Schema.spendGems(data: Data, amount: number): boolean
