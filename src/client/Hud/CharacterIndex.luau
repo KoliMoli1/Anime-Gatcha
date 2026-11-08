@@ -1,7 +1,7 @@
 --!nonstrict
--- Characters screen (outside combat): pick any character to see its stats on the left,
--- its combat model facing the camera in the middle and its kit on the right.
--- Placeholder styling until Phase A.
+-- Collection screen (roadmap Phase 4): every character, filtered by rarity, class and
+-- ownership. Pick one to see its stats and pie chart on the left, its combat model in the
+-- middle and its kit on the right. Placeholder styling until Phase A.
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -13,6 +13,7 @@ local SkillContent = require(ReplicatedStorage.Shared.Content.Skills)
 local KitForms = require(ReplicatedStorage.Shared.Content.KitForms)
 local State = require(script.Parent.Parent.Battle.BattleState)
 local StatPie = require(script.Parent.Parent.Battle.StatPie)
+local ProfileState = require(script.Parent.ProfileState)
 
 local create = vide.create
 local source = vide.source
@@ -139,23 +140,37 @@ local function statsColumn(def)
 			TextColor3 = Theme.Class[def.Class] or Theme.Text,
 			Text = `{def.Rarity}★ {def.Class}`,
 		}),
-		create("Frame")({
+		text({
 			LayoutOrder = 3,
+			TextSize = 12,
+			TextColor3 = function()
+				return if ProfileState.owned(def.Id) then Theme.Good else Theme.TextDim
+			end,
+			Text = function()
+				local owned = ProfileState.owned(def.Id)
+				if not owned then
+					return "Not owned yet"
+				end
+				return `Owned  ·  {owned.Dupes} duplicates  ·  Equip Capacity {owned.Capacity}`
+			end,
+		}),
+		create("Frame")({
+			LayoutOrder = 4,
 			Size = UDim2.new(1, 0, 0, 150),
 			BackgroundTransparency = 1,
 			StatPie.create(function()
 				return values
 			end, 146),
 		}),
-		statRow(4, "HP", tostring(stats.HP), Theme.Stat.HP),
-		statRow(5, "ATK", tostring(stats.ATK), Theme.Stat.ATK),
-		statRow(6, "DEF", tostring(stats.DEF), Theme.Stat.DEF),
-		statRow(7, "Speed", `{def.Speed.Min}–{def.Speed.Max}`, Theme.Stat.SPD),
-		statRow(8, "Crit rate", percent(stats.CritRate), Theme.Stat.CritRate),
-		statRow(9, "Crit damage", string.format("%.2fx", stats.CritDamage), Theme.Stat.CritDamage),
-		statRow(10, "Effectiveness", percent(stats.EFF), Theme.Stat.EFF),
-		statRow(11, "Resistance", percent(stats.RES), Theme.Stat.RES),
-		statRow(12, "Energy per round", `+{def.EnergyRegen}`, Theme.Accent),
+		statRow(5, "HP", tostring(stats.HP), Theme.Stat.HP),
+		statRow(6, "ATK", tostring(stats.ATK), Theme.Stat.ATK),
+		statRow(7, "DEF", tostring(stats.DEF), Theme.Stat.DEF),
+		statRow(8, "Speed", `{def.Speed.Min}–{def.Speed.Max}`, Theme.Stat.SPD),
+		statRow(9, "Crit rate", percent(stats.CritRate), Theme.Stat.CritRate),
+		statRow(10, "Crit damage", string.format("%.2fx", stats.CritDamage), Theme.Stat.CritDamage),
+		statRow(11, "Effectiveness", percent(stats.EFF), Theme.Stat.EFF),
+		statRow(12, "Resistance", percent(stats.RES), Theme.Stat.RES),
+		statRow(13, "Energy per round", `+{def.EnergyRegen}`, Theme.Accent),
 	})
 end
 
@@ -288,6 +303,58 @@ end
 function CharacterIndex.create(open: (boolean?) -> boolean)
 	local ids = roster()
 	local selected = source(ids[1])
+	-- Filters: 0 = any rarity, "All" = any class.
+	local rarityFilter = source(0)
+	local classFilter = source("All")
+	local ownedOnly = source(false)
+	local function matches(id: string): boolean
+		local def = Characters[id]
+		return (rarityFilter() == 0 or def.Rarity == rarityFilter())
+			and (classFilter() == "All" or def.Class == classFilter())
+			and (not ownedOnly() or ProfileState.owned(id) ~= nil)
+	end
+
+	local function chip(order: number, label: string, isOn: () -> boolean, onClick: () -> (), color: Color3?)
+		return create("TextButton")({
+			LayoutOrder = order,
+			Size = UDim2.fromOffset(0, 30),
+			AutomaticSize = Enum.AutomaticSize.X,
+			BackgroundColor3 = function()
+				return if isOn() then color or Theme.Accent else Theme.PanelLight
+			end,
+			Font = Enum.Font.GothamBold,
+			TextSize = 13,
+			TextColor3 = function()
+				return if isOn() then Theme.Panel else Theme.Text
+			end,
+			Text = label,
+			corner(6),
+			create("UIPadding")({ PaddingLeft = UDim.new(0, 10), PaddingRight = UDim.new(0, 10) }),
+			Activated = onClick,
+		})
+	end
+
+	local filterChips = {}
+	local function addChip(...)
+		table.insert(filterChips, chip(#filterChips + 1, ...))
+	end
+	for _, rarity in { 0, 5, 4, 3 } do
+		addChip(if rarity == 0 then "All ★" else `{rarity}★`, function()
+			return rarityFilter() == rarity
+		end, function()
+			rarityFilter(rarity)
+		end)
+	end
+	for _, class in { "All", "Attack", "Defense", "Support", "Disrupt", "Speed" } do
+		addChip(if class == "All" then "All classes" else class, function()
+			return classFilter() == class
+		end, function()
+			classFilter(class)
+		end, Theme.Class[class])
+	end
+	addChip("Owned only", ownedOnly, function()
+		ownedOnly(not ownedOnly())
+	end, Theme.Good)
 	local views = {}
 	for _, id in ids do
 		views[id] = function()
@@ -300,6 +367,9 @@ function CharacterIndex.create(open: (boolean?) -> boolean)
 		local def = Characters[id]
 		buttons[index] = create("TextButton")({
 			LayoutOrder = index,
+			Visible = function()
+				return matches(id)
+			end,
 			Size = UDim2.fromOffset(140, 34),
 			BackgroundColor3 = function()
 				return if selected() == id then Theme.Accent else Theme.PanelLight
@@ -309,7 +379,11 @@ function CharacterIndex.create(open: (boolean?) -> boolean)
 			TextColor3 = function()
 				return if selected() == id then Theme.Panel else Theme.Text
 			end,
-			Text = `{def.Name} {def.Rarity}★`,
+			Text = function()
+				return if ProfileState.owned(id)
+					then `{def.Name} {def.Rarity}★`
+					else `{def.Name} {def.Rarity}★ 🔒`
+			end,
 			corner(6),
 			Activated = function()
 				selected(id)
@@ -345,7 +419,19 @@ function CharacterIndex.create(open: (boolean?) -> boolean)
 					Font = Enum.Font.GothamBlack,
 					TextSize = 20,
 					TextColor3 = Theme.Accent,
-					Text = "Characters",
+					Text = "Collection",
+				}),
+				create("Frame")({
+					Name = "Filters",
+					Position = UDim2.fromOffset(0, 46),
+					Size = UDim2.new(1, 0, 0, 30),
+					BackgroundTransparency = 1,
+					create("UIListLayout")({
+						FillDirection = Enum.FillDirection.Horizontal,
+						Padding = UDim.new(0, 6),
+						SortOrder = Enum.SortOrder.LayoutOrder,
+					}),
+					filterChips,
 				}),
 				create("ScrollingFrame")({
 					Position = UDim2.fromOffset(160, 0),
@@ -379,8 +465,8 @@ function CharacterIndex.create(open: (boolean?) -> boolean)
 				}),
 				create("Frame")({
 					Name = "Body",
-					Position = UDim2.fromOffset(0, 52),
-					Size = UDim2.new(1, 0, 1, -52),
+					Position = UDim2.fromOffset(0, 88),
+					Size = UDim2.new(1, 0, 1, -88),
 					BackgroundTransparency = 1,
 					switch(selected)(views),
 				}),

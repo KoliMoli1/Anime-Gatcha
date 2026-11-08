@@ -107,6 +107,11 @@ function RosterService.ProfileSnapshot(player: Player)
 end
 
 local function publish(player: Player)
+	-- Everyone's client draws this player's team following them in the hub.
+	local data = ProfileService.Get(player)
+	if data then
+		player:SetAttribute("TeamIds", table.concat(teamIds(data), ","))
+	end
 	collectionUpdated:FireClient(player, RosterService.Collection(player))
 	profileUpdated:FireClient(player, RosterService.ProfileSnapshot(player))
 end

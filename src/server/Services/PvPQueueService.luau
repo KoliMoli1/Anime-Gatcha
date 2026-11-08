@@ -112,39 +112,47 @@ local function createMatch(a: Player, b: Player, teamA, teamB)
 	publish(status)
 end
 
+-- Called by the JoinPvPQueue remote and by ZoneService when a player steps into the PvP circle.
+function PvPQueueService.Join(player: Player)
+	if player:GetAttribute("PvPMatchId") then
+		return publicSnapshot(player, "You already have a PvP match.")
+	end
+	local team, reason = validatedTeam(player)
+	if not team then
+		return publicSnapshot(player, reason)
+	end
+	if queued[player] then
+		return publicSnapshot(player, "You are already searching.")
+	end
+	queued[player] = true
+	table.insert(waiting, { Player = player, Team = team })
+	if #waiting >= 2 then
+		local first = table.remove(waiting, 1)
+		local second = table.remove(waiting, 1)
+		if first.Player.Parent and second.Player.Parent then
+			createMatch(first.Player, second.Player, first.Team, second.Team)
+		end
+	end
+	publish("Searching this server for an opponent...")
+	return publicSnapshot(player)
+end
+
+function PvPQueueService.Leave(player: Player)
+	local wasQueued = queued[player] == true
+	removeFromQueue(player)
+	if wasQueued then
+		publish("You left the PvP queue.")
+	end
+	return publicSnapshot(player, "You left the PvP queue.")
+end
+
 function PvPQueueService.Start()
 	Net.handle("GetPvPQueueSnapshot", { Rate = 2 }, function(player)
 		return publicSnapshot(player)
 	end)
 	Net.handle("GetPvPMatchSnapshot", { Rate = 2 }, matchSnapshot)
-	Net.handle("JoinPvPQueue", { Rate = 1, Burst = 3 }, function(player)
-		if player:GetAttribute("PvPMatchId") then
-			return publicSnapshot(player, "You already have a PvP match.")
-		end
-		local team, reason = validatedTeam(player)
-		if not team then
-			return publicSnapshot(player, reason)
-		end
-		if queued[player] then
-			return publicSnapshot(player, "You are already searching.")
-		end
-		queued[player] = true
-		table.insert(waiting, { Player = player, Team = team })
-		if #waiting >= 2 then
-			local first = table.remove(waiting, 1)
-			local second = table.remove(waiting, 1)
-			if first.Player.Parent and second.Player.Parent then
-				createMatch(first.Player, second.Player, first.Team, second.Team)
-			end
-		end
-		publish("Searching this server for an opponent...")
-		return publicSnapshot(player)
-	end)
-	Net.handle("LeavePvPQueue", { Rate = 1, Burst = 3 }, function(player)
-		removeFromQueue(player)
-		publish("You left the PvP queue.")
-		return publicSnapshot(player, "You left the PvP queue.")
-	end)
+	Net.handle("JoinPvPQueue", { Rate = 1, Burst = 3 }, PvPQueueService.Join)
+	Net.handle("LeavePvPQueue", { Rate = 1, Burst = 3 }, PvPQueueService.Leave)
 	Players.PlayerRemoving:Connect(function(player)
 		removeFromQueue(player)
 		local id = player:GetAttribute("PvPMatchId")

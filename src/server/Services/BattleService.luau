@@ -178,6 +178,7 @@ function BattleService._close(battle)
 	for _, player in battle.Players do
 		if battleOf[player] == battle.Id then
 			battleOf[player] = nil
+			player:SetAttribute("InBattle", nil)
 		end
 		local character = player.Character
 		local root = character and character:FindFirstChild("HumanoidRootPart")
@@ -216,6 +217,8 @@ function BattleService.StartBattle(kind: string, teams, players: { [number]: Pla
 
 	for side, player in players do
 		battleOf[player] = id
+		-- Read by the hub (zones and team followers ignore players who are fighting).
+		player:SetAttribute("InBattle", id)
 		local stand = ArenaService.StandCFrame(battle.Arena.Center, side)
 		pcall(player.RequestStreamAroundAsync, player, stand.Position)
 		local character = player.Character
