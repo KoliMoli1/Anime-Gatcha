@@ -115,6 +115,19 @@ local function effectLines(unit): string
 			table.insert(lines, "Stunned: skips next action")
 		elseif effect.Kind == "StunImmune" then
 			table.insert(lines, "Stun immune")
+		elseif effect.Kind == "DamageReduction" then
+			local amount = math.floor(effect.Amount * 100 + 0.5)
+			if effect.Permanent then
+				table.insert(lines, `Barrier: -{amount}% damage`)
+			else
+				table.insert(lines, `-{amount}% damage ({turnsText(effect.Turns)})`)
+			end
+		elseif effect.Kind == "Provoke" then
+			table.insert(lines, "Provoked: must target the taunter")
+		elseif effect.Kind == "Bleed" then
+			table.insert(lines, `Bleed {math.floor(effect.Amount * 100 + 0.5)}% x{effect.Count}`)
+		elseif effect.Kind == "BleedImmune" then
+			table.insert(lines, `Bleed immune ({effect.Count} counts)`)
 		elseif effect.Stat then
 			local relative = effect.Stat == "ATK" or effect.Stat == "DEF" or effect.Stat == "SPD"
 			local amount = math.floor(effect.Amount * 100 + 0.5)
@@ -150,12 +163,20 @@ local function skillButton(index: number, actions: Actions)
 			return false
 		end
 		local action = State.actions()[selected.Slot]
-		local refund = if action then unit.Skills[action.Skill].Cost else 0
+		local current = action and unit.Skills[action.Skill]
+		local refund = if current then current.Cost else 0
 		return State.remainingEnergy() + refund >= skill.Cost
+	end
+	local usable = function()
+		local skill = skillOf()
+		return skill ~= nil and skill.Usable ~= false
 	end
 	return button({
 		LayoutOrder = 10 + index,
 		Size = UDim2.new(1, 0, 0, 52),
+		Visible = function()
+			return skillOf() ~= nil
+		end,
 		TextXAlignment = Enum.TextXAlignment.Left,
 		TextYAlignment = Enum.TextYAlignment.Top,
 		TextWrapped = true,
@@ -167,13 +188,17 @@ local function skillButton(index: number, actions: Actions)
 			if chosen() then
 				return Color3.fromRGB(150, 115, 35)
 			end
-			if ownChoosing() and not affordable() then
+			if ownChoosing() and not (affordable() and usable()) then
 				return Color3.fromRGB(70, 40, 44)
 			end
 			return if ownChoosing() then Theme.PanelLight else Theme.Panel
 		end,
 		TextColor3 = function()
-			return if ownChoosing() and not affordable() and not chosen() then Theme.TextDim else Theme.Text
+			return if ownChoosing()
+					and not (affordable() and usable())
+					and not chosen()
+				then Theme.TextDim
+				else Theme.Text
 		end,
 		Text = function()
 			local skill = skillOf()
@@ -185,6 +210,9 @@ local function skillButton(index: number, actions: Actions)
 					and not chosen()
 				then "  ·  not enough energy"
 				else ""
+			if skill.Usable == false then
+				warning = `  ·  {skill.Reason or "unavailable"}`
+			end
 			return `  {skill.Name}  ·  {skill.Kind}  ·  {skill.Cost} energy{warning}\n  {skill.Description}`
 		end,
 		padding(4),
@@ -197,12 +225,39 @@ local function skillButton(index: number, actions: Actions)
 	})
 end
 
+-- Skips the unit's turn; needed when its cheapest move costs more energy than is left.
+local function restButton(actions: Actions)
+	local ownChoosing = function()
+		local unit, selected = selectedUnit()
+		return unit ~= nil and selected.Side == State.side() and unit.Alive and State.phase() == "Choosing"
+	end
+	return button({
+		LayoutOrder = 20,
+		Size = UDim2.new(1, 0, 0, 24),
+		TextSize = 12,
+		Font = Enum.Font.Gotham,
+		Visible = ownChoosing,
+		BackgroundColor3 = function()
+			local _, selected = selectedUnit()
+			local action = selected and State.actions()[selected.Slot]
+			return if action and action.Skill == State.REST then Color3.fromRGB(150, 115, 35) else Theme.Panel
+		end,
+		Text = "Rest (skip this turn)",
+		Activated = function()
+			local _, selected = selectedUnit()
+			if ownChoosing() and selected then
+				actions.chooseSkill(selected.Slot, State.REST)
+			end
+		end,
+	})
+end
+
 local function infoPanel(actions: Actions)
 	return create("Frame")({
 		Name = "InfoPanel",
 		AnchorPoint = Vector2.new(0, 0.5),
 		Position = UDim2.new(0, 12, 0.5, 0),
-		Size = UDim2.fromOffset(310, 500),
+		Size = UDim2.fromOffset(310, 590),
 		BackgroundColor3 = Theme.Panel,
 		BackgroundTransparency = 0.1,
 		Visible = function()
@@ -227,7 +282,7 @@ local function infoPanel(actions: Actions)
 		}),
 		label({
 			LayoutOrder = 2,
-			Size = UDim2.new(1, 0, 0, 16),
+			Size = UDim2.new(1, 0, 0, 32),
 			TextColor3 = Theme.TextDim,
 			Text = function()
 				local unit = selectedUnit()
@@ -236,7 +291,8 @@ local function infoPanel(actions: Actions)
 				end
 				local hp = State.hp()[State.selected().Side]
 				local current = hp and hp[State.selected().Slot] or unit.HP
-				return `{unit.Rarity}-star {unit.Class}  ·  HP {current}/{unit.MaxHP}  ·  Speed {unit.SpeedRange.Min}-{unit.SpeedRange.Max}`
+				local regen = unit.EnergyRegen or 0
+				return `{unit.Rarity}-star {unit.Class}  ·  HP {current}/{unit.MaxHP}  ·  Speed {unit.SpeedRange.Min}-{unit.SpeedRange.Max}\nEnergy +{regen} per round`
 			end,
 		}),
 		create("Frame")({
@@ -279,9 +335,23 @@ local function infoPanel(actions: Actions)
 				return ""
 			end,
 		}),
+		label({
+			LayoutOrder = 6,
+			Size = UDim2.fromScale(1, 0),
+			AutomaticSize = Enum.AutomaticSize.Y,
+			TextSize = 12,
+			TextWrapped = true,
+			TextColor3 = Theme.Accent,
+			Font = Enum.Font.GothamBold,
+			Text = function()
+				local unit = selectedUnit()
+				return if unit and unit.Status then table.concat(unit.Status, "\n") else ""
+			end,
+		}),
 		skillButton(1, actions),
 		skillButton(2, actions),
 		skillButton(3, actions),
+		restButton(actions),
 	})
 end
 
@@ -405,6 +475,9 @@ local function actionBar(actions: Actions)
 					return `{slot}. {unit.Name} — choose a move`
 				end
 				local skill = unit.Skills[action.Skill]
+				if not skill then
+					return `{slot}. {unit.Name} — Rest`
+				end
 				local text = `{slot}. {unit.Name} — {skill.Name}`
 				if action.Target and (skill.Target == "Enemy" or skill.Target == "Ally") then
 					local targetSide = if skill.Target == "Enemy" then 3 - State.side() else State.side()

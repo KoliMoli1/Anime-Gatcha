@@ -43,6 +43,9 @@ function BattleText.describe(event: { [string]: any }, names: Names, viewSide: n
 		if event.Crit then
 			text ..= " (critical)"
 		end
+		if event.Reduced and event.Reduced > 0 then
+			text ..= `, {event.Reduced} reduced`
+		end
 		if event.Absorbed and event.Absorbed > 0 then
 			text ..= `, {event.Absorbed} blocked by shield`
 		end
@@ -74,12 +77,47 @@ function BattleText.describe(event: { [string]: any }, names: Names, viewSide: n
 		elseif event.Kind == "EnergySteal" then
 			local thief = if event.SourceSide == viewSide then "Your team" else "The enemy"
 			return `  {thief} stole {event.Amount} energy.`
+		elseif event.Kind == "DamageReduction" then
+			return `  {who} takes {math.floor(event.Amount * 100 + 0.5)}% less damage.`
+		elseif event.Kind == "Provoke" then
+			return `  {who} must target {BattleText.unit(names, viewSide, event.SourceSide, event.SourceSlot)}.`
+		elseif event.Kind == "StripBuffs" then
+			return `  {who} lost its buffs.`
+		elseif event.Kind == "Bleed" then
+			return `  {who} is bleeding ({math.floor(event.Amount * 100 + 0.5)}% x{event.Count}).`
 		end
 	elseif kind == "EffectMissed" then
 		local who = BattleText.unit(names, viewSide, event.Side, event.Slot)
-		return if event.Reason == "Immune" then `  {who} can't be stunned again yet.` else `  {who} resisted.`
+		if event.Reason == "Immune" then
+			return `  {who} can't be stunned again yet.`
+		elseif event.Reason == "DebuffImmune" then
+			return `  {who} is immune to debuffs.`
+		elseif event.Reason == "BleedImmune" then
+			return `  {who} blocked the bleed.`
+		end
+		return `  {who} resisted.`
 	elseif kind == "Burn" then
 		return `  {BattleText.unit(names, viewSide, event.Side, event.Slot)} took {event.Amount} burn damage.`
+	elseif kind == "Bleed" then
+		return `  {BattleText.unit(names, viewSide, event.Side, event.Slot)} took {event.Amount} bleed damage.`
+	elseif kind == "Dodge" then
+		return `  {BattleText.unit(names, viewSide, event.Side, event.Slot)} dodged!`
+	elseif kind == "Combo" then
+		return `  {event.Hits}-hit combo!`
+	elseif kind == "Transform" then
+		local who = BattleText.unit(names, viewSide, event.Side, event.Slot)
+		return if event.Form == "Devil" then `{who} broke the seal and transformed!` else `{who} transformed!`
+	elseif kind == "Shadow" then
+		local owner = if event.Side == viewSide then "Your" else "Enemy"
+		return `  {owner} {event.Name} rises!`
+	elseif kind == "Kit" then
+		return `  {BattleText.unit(names, viewSide, event.Side, event.Slot)}: {event.Text}`
+	elseif kind == "Cancelled" then
+		return `{BattleText.unit(names, viewSide, event.Side, event.Slot)}'s {event.SkillName} was cancelled (+{event.Refund} energy back).`
+	elseif kind == "Sealed" then
+		return `{BattleText.unit(names, viewSide, event.Side, event.Slot)} is sealed and can't act.`
+	elseif kind == "Rest" then
+		return `{BattleText.unit(names, viewSide, event.Side, event.Slot)} rests.`
 	elseif kind == "Stunned" then
 		return `{BattleText.unit(names, viewSide, event.Side, event.Slot)} is stunned and loses its turn.`
 	elseif kind == "Revive" then
@@ -89,7 +127,11 @@ function BattleText.describe(event: { [string]: any }, names: Names, viewSide: n
 	elseif kind == "Counter" then
 		return `  {BattleText.unit(names, viewSide, event.Side, event.Slot)} counters!`
 	elseif kind == "Fallback" then
-		return `  {BattleText.unit(names, viewSide, event.Side, event.Slot)} ran out of energy and used a basic attack.`
+		local who = BattleText.unit(names, viewSide, event.Side, event.Slot)
+		if event.Reason then
+			return `  {who} couldn't use that move ({event.Reason}) and used a basic attack.`
+		end
+		return `  {who} ran out of energy and used a basic attack.`
 	elseif kind == "KO" then
 		return `  {BattleText.unit(names, viewSide, event.Side, event.Slot)} was knocked out!`
 	elseif kind == "BattleEnd" then

@@ -8,6 +8,8 @@ local vide = require(ReplicatedStorage.Packages.vide)
 local source = vide.source
 
 local State = {
+	-- Action.Skill value that skips a unit's turn (BattleSession.REST).
+	REST = 0,
 	battleId = source(nil :: string?),
 	side = source(1),
 	center = source(CFrame.identity),

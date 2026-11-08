@@ -28,15 +28,47 @@ export type EffectRecipient = "Target" | "Self" | "AllAllies" | "AllEnemies" | "
 -- Burn: Amount = fraction of max HP lost at the end of each round (ignores DEF).
 -- Stun: the unit skips its next action. EnergySteal: Amount energy moves to the caster's team.
 -- Revive: brings a FallenAlly back with Amount of max HP (once per unit per battle).
+-- DamageReduction: Amount of incoming damage removed. Provoke: the recipient's single-target
+-- moves must target the source. StripBuffs: removes the recipient's ATK buffs and timed damage
+-- reduction (or its DEF buffs when Stat = "DEF"). Bleed: Amount = potency (fraction of max HP
+-- lost per damaging hit taken), Count = how many hits it lasts.
 export type EffectSpec = {
-	Kind: "StatMod" | "Taunt" | "Heal" | "Shield" | "Cleanse" | "Energy" | "Burn" | "Stun" | "EnergySteal" | "Revive",
+	Kind: "StatMod"
+		| "Taunt"
+		| "Heal"
+		| "Shield"
+		| "Cleanse"
+		| "Energy"
+		| "Burn"
+		| "Stun"
+		| "EnergySteal"
+		| "Revive"
+		| "DamageReduction"
+		| "Provoke"
+		| "StripBuffs"
+		| "Bleed",
 	To: EffectRecipient?,
 	Stat: StatName?,
 	Amount: number?,
 	Turns: number?,
+	Count: number?,
 	-- Debuffs only: which part Effectiveness/Resistance scales ("Chance" = landing chance).
 	Scale: ("Power" | "Duration" | "Chance")?,
 	Chance: number?,
+	-- Chance is not scaled by Effectiveness/Resistance.
+	Flat: boolean?,
+	-- Lasts only until the end of the current round.
+	ThisRound: boolean?,
+}
+
+-- Multi-hit move: the first Guaranteed hits always land, each later hit rolls
+-- (crit chance + CritBonus) x LandScale[n] and needs the previous hit to have landed.
+-- Hits after the guaranteed ones also get CritBonus and CritDamageBonus.
+export type ComboSpec = {
+	Guaranteed: number,
+	LandScale: { number },
+	CritBonus: number,
+	CritDamageBonus: number,
 }
 
 export type SkillKind = "Basic" | "Skill" | "Ultimate"
@@ -52,6 +84,20 @@ export type SkillDef = {
 	Effects: { EffectSpec }?,
 	-- Extra hit on any target left below Threshold of max HP after the skill's hits.
 	FollowUp: { Threshold: number, Multiplier: number }?,
+	-- Applied to each target that the attack reaches, before the hit.
+	PreEffects: { EffectSpec }?,
+	Combo: ComboSpec?,
+	-- Damage as a fraction of the target's max HP instead of ATK (ignores DEF, no crit).
+	PercentMaxHP: number?,
+	-- Fraction of the target's DEF ignored.
+	IgnoreDef: number?,
+	NoCrit: boolean?,
+	-- Ignores timed damage reduction (not permanent reduction such as a barrier).
+	Pierce: boolean?,
+	-- Rounds the skill can't be used after a successful cast.
+	Cooldown: number?,
+	-- The character's kit resolves this skill itself (Kits.luau Cast hook).
+	Custom: boolean?,
 	Description: string,
 }
 
@@ -76,6 +122,8 @@ export type CharacterDef = {
 	Skills: { string },
 	Passive: string?,
 	Starter: boolean?,
+	-- Signature-gimmick hooks in Combat/Kits.luau.
+	Kit: string?,
 }
 
 export type ItemDef = {

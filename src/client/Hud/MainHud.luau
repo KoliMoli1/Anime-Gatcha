@@ -1,5 +1,6 @@
 --!nonstrict
--- Temporary entry point until the hub circles (Phase 4): a Practice Battle button.
+-- Temporary entry point until the hub circles (Phase 4): a Practice Battle button,
+-- the Characters screen, and the Test Teams picker for Studio playtests and admins.
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -7,6 +8,8 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local vide = require(ReplicatedStorage.Packages.vide)
 local Theme = require(ReplicatedStorage.Shared.Theme)
 local State = require(script.Parent.Parent.Battle.BattleState)
+local TestTeams = require(script.Parent.TestTeams)
+local CharacterIndex = require(script.Parent.CharacterIndex)
 
 local create = vide.create
 local source = vide.source
@@ -14,9 +17,12 @@ local source = vide.source
 local MainHud = {}
 
 function MainHud.Start()
-	local remote = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("StartPracticeBattle")
+	local remotes = ReplicatedStorage:WaitForChild("Remotes")
+	local remote = remotes:WaitForChild("StartPracticeBattle")
+	local testRemote = remotes:WaitForChild("StartTestBattle") :: RemoteFunction
 	local message = source("")
 	local busy = source(false)
+	local indexOpen = source(false)
 
 	vide.root(function()
 		create("ScreenGui")({
@@ -58,6 +64,20 @@ function MainHud.Start()
 					end
 				end,
 			}),
+			create("TextButton")({
+				AnchorPoint = Vector2.new(0, 1),
+				Position = UDim2.new(0, 16, 1, -100),
+				Size = UDim2.fromOffset(220, 44),
+				BackgroundColor3 = Theme.PanelLight,
+				Font = Enum.Font.GothamBlack,
+				TextSize = 18,
+				TextColor3 = Theme.Text,
+				Text = "Characters",
+				create("UICorner")({ CornerRadius = UDim.new(0, 10) }),
+				Activated = function()
+					indexOpen(true)
+				end,
+			}),
 			create("TextLabel")({
 				AnchorPoint = Vector2.new(0, 1),
 				Position = UDim2.new(0, 16, 1, -76),
@@ -72,7 +92,9 @@ function MainHud.Start()
 					return message()
 				end,
 			}),
+			TestTeams.create(testRemote),
 		})
+		CharacterIndex.create(indexOpen)
 	end)
 end
 

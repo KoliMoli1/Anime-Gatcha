@@ -1,6 +1,7 @@
 local Schema = require("../src/shared/Rules/ProfileSchema")
 local Characters = require("../src/shared/Content/Characters")
 local Items = require("../src/shared/Content/Items")
+local Loadout = require("../src/shared/Rules/Loadout")
 
 local NOW = 1_800_000_000
 
@@ -55,8 +56,10 @@ return function(t)
 		end
 		local kind, coins = Schema.grantCharacter(data, def, NOW)
 		t.equal(kind, "Overflow")
-		t.equal(coins, 25)
-		t.equal(data.CosmeticCoins, 25)
+		local expected = Loadout.OVERFLOW_COINS[def.Rarity]
+		t.truthy(expected and expected > 0, "overflow value for this rarity")
+		t.equal(coins, expected)
+		t.equal(data.CosmeticCoins, expected)
 	end)
 
 	t.test("earned gems are spent before paid gems", function()

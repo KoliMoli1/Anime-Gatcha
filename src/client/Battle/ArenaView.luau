@@ -57,10 +57,21 @@ local function effectSummary(unit): string
 			table.insert(parts, `Burn {effect.Turns}`)
 		elseif effect.Kind == "Stun" then
 			table.insert(parts, "Stunned")
+		elseif effect.Kind == "DamageReduction" then
+			local label = if effect.Permanent then "Barrier" else "DR"
+			table.insert(parts, `{label} {math.floor(effect.Amount * 100 + 0.5)}%`)
+		elseif effect.Kind == "Provoke" then
+			table.insert(parts, "Provoked")
+		elseif effect.Kind == "Bleed" then
+			table.insert(parts, `Bleed {math.floor(effect.Amount * 100 + 0.5)} x{effect.Count}`)
 		elseif effect.Stat then
 			local arrow = if effect.Amount >= 0 then "+" else "-"
 			table.insert(parts, `{effect.Stat}{arrow} {effect.Turns}`)
 		end
+	end
+	-- The kit's headline (meter, seal timer, immunity) shows to both players.
+	if unit.Status and unit.Status[1] then
+		table.insert(parts, 1, unit.Status[1])
 	end
 	return table.concat(parts, "  ")
 end
@@ -161,7 +172,7 @@ local function unitLabel(side: number, slot: number, model: Model)
 					return ""
 				end
 				local skill = unit.Skills[action.Skill]
-				local text = skill and skill.Name or "?"
+				local text = skill and skill.Name or (if action.Skill == State.REST then "Rest" else "?")
 				if action.Target and skill and (skill.Target == "Enemy" or skill.Target == "Ally") then
 					local targetSide = if skill.Target == "Enemy" then 3 - side else side
 					local target = State.unit(targetSide, action.Target)

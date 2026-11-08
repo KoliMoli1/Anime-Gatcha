@@ -6,6 +6,7 @@
 --
 -- Remotes:
 --   StartPracticeBattle() -> { success, message }
+--   StartTestBattle(yourIds, enemyIds) -> { success, message }  (Studio/admins: any 3 v 3, no gems)
 --   SubmitActions(battleId, actions) -> { success, message }
 --   LeaveBattle(battleId) -> { success }
 --   BattleStarted (server -> client): { BattleId, Side, Center, Snapshot, Events, Deadline }
@@ -27,6 +28,7 @@ local Net = require(script.Parent.Net)
 local ProfileService = require(script.Parent.ProfileService)
 local EconomyService = require(script.Parent.EconomyService)
 local ArenaService = require(script.Parent.ArenaService)
+local AdminService = require(script.Parent.AdminService)
 
 local BattleService = {}
 
@@ -124,7 +126,8 @@ local function finish(battle)
 	local result = {}
 	for side, player in battle.Players do
 		local outcome = if session.Winner == side then "Win" elseif session.Winner == 0 then "Draw" else "Loss"
-		local amount = BattleRewardRules.gemsForOutcome(outcome) or 0
+		-- Test battles use hand-picked teams, so they pay nothing.
+		local amount = if battle.Kind == "Test" then 0 else BattleRewardRules.gemsForOutcome(outcome) or 0
 		local claimed = EconomyService.ClaimReward(player, `{battle.Id}_{side}`, amount, outcome)
 		result[side] = { Outcome = outcome, Gems = if claimed then amount else 0 }
 	end
@@ -286,6 +289,38 @@ function BattleService.Start()
 			enemy[index] = { Character = Characters[id], Items = {} }
 		end
 		BattleService.StartBattle("Practice", { playerTeam(player), enemy }, { [1] = player })
+		return { success = true }
+	end)
+	local teamIds = t.strictArray(t.string, t.string, t.string)
+	Net.handle("StartTestBattle", {
+		Rate = 0.5,
+		Burst = 2,
+		Validate = t.tuple(teamIds, teamIds),
+	}, function(player, yourIds, enemyIds)
+		if not AdminService.IsAdmin(player) then
+			return { success = false, message = "Test battles are for Studio and admins only." }
+		end
+		if battleOf[player] then
+			return { success = false, message = "You are already in a battle." }
+		end
+		if not player.Character or not player.Character:FindFirstChild("HumanoidRootPart") then
+			return { success = false, message = "Wait for your character to load." }
+		end
+		local teams = {}
+		for side, ids in { yourIds, enemyIds } do
+			if #ids ~= 3 then
+				return { success = false, message = "Pick three units per team." }
+			end
+			teams[side] = {}
+			for slot, id in ids do
+				local def = Characters[id]
+				if not def then
+					return { success = false, message = `Unknown character {id}.` }
+				end
+				teams[side][slot] = { Character = def, Items = {} }
+			end
+		end
+		BattleService.StartBattle("Test", teams, { [1] = player })
 		return { success = true }
 	end)
 	Net.handle("SubmitActions", {
